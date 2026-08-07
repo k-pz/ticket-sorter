@@ -28,12 +28,15 @@ uv run octopus-tickets-sorter --rename-input
 
 ## Uploading to Google Drive + Sheets
 
-Add `--upload-drive` to also upload everything to a fresh, timestamped Google
-Drive folder (mirroring the `tickets/`/`duplicates/` layout, plus the two
-CSVs) and build a Google Sheet with a `Tickets` tab and a `Duplicates` tab.
-Each row gets a "ticket_pdf" column that links straight to the uploaded PDF,
-and both tabs get a bold frozen header row with a filter applied so you can
-sort/filter them like a normal table.
+Add `--upload-drive` to also upload everything to a Google Drive folder
+(mirroring the `tickets/`/`duplicates/` layout, plus the two CSVs) and build
+a Google Sheet with a `Tickets` tab and a `Duplicates` tab. Each row gets a
+"ticket_pdf" column that links straight to the uploaded PDF, and both tabs
+get a bold frozen header row with a filter applied so you can sort/filter
+them like a normal table.
+
+The Drive folder and Sheet are both named after the `name` in `config.toml`
+(see below).
 
 ```sh
 uv run octopus-tickets-sorter --upload-drive
@@ -42,13 +45,13 @@ uv run octopus-tickets-sorter --upload-drive
 ## Creating a Google Calendar
 
 Add `--create-calendar` (alongside `--upload-drive`, since events link to the
-uploaded tickets) to also build a Google Calendar named "Octopus 2026
-Tickets", with one event per showing: title is the movie, location is the
-venue address, and the description links to each attendee's ticket PDF by
-name (e.g. "Anna Nowak's ticket"). It doesn't try to match names
-to Google accounts or invite anyone as an attendee — the names are just text
-with a link next to them. Re-running wipes and rebuilds the calendar's
-events, same as the Drive folder and Sheet.
+uploaded tickets) to also build a Google Calendar — named the same as the
+Drive folder/Sheet — with one event per showing: title is the movie,
+location is the venue address, and the description links to each attendee's
+ticket PDF by name (e.g. "Anna Nowak's ticket"). It doesn't try
+to match names to Google accounts or invite anyone as an attendee — the
+names are just text with a link next to them. Re-running wipes and rebuilds
+the calendar's events, same as the Drive folder and Sheet.
 
 ```sh
 uv run octopus-tickets-sorter --upload-drive --create-calendar
@@ -69,6 +72,19 @@ Notes:
 - The printed `Calendar:` link opens the calendar directly; from there use
   Google Calendar's own sharing options if you want to add it to someone
   else's account.
+
+### Naming the Drive folder, Sheet, and Calendar
+
+The name they all share comes from `config.toml` in the project root:
+
+```toml
+name = "Octopus 2026 Tickets"
+```
+
+If `config.toml` doesn't exist yet, the first `--upload-drive` run asks for a
+name on the command line and creates the file for you, so future runs don't
+ask again. Edit the file (or delete it to be asked again) to change the
+name; custom path: `--config PATH`.
 
 ### One-time setup: Google Cloud OAuth client
 

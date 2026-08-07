@@ -19,5 +19,8 @@ wheels/
 /credentials.json
 /token.json
 
+# Local config, created interactively on first --upload-drive run
+/config.toml
+
 # macOS
 .DS_Store

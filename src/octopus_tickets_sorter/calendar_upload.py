@@ -8,7 +8,6 @@ from googleapiclient.discovery import build
 from .colors import showing_hues, showing_key
 from .drive_upload import get_credentials
 
-CALENDAR_NAME = "Octopus 2026 Tickets"
 TIME_ZONE = "Europe/Warsaw"
 FALLBACK_LENGTH_MIN = 90  # used only if a movie's runtime is unknown
 
@@ -81,17 +80,17 @@ def _event_body(key: tuple, tickets: list, color_id: str) -> dict:
     }
 
 
-def create_calendar(rows: list, credentials_path: Path, token_path: Path) -> str:
+def create_calendar(rows: list, name: str, credentials_path: Path, token_path: Path) -> str:
     creds = get_credentials(credentials_path, token_path)
     cal = build("calendar", "v3", credentials=creds)
 
-    calendar_id = _find_calendar(cal, CALENDAR_NAME)
+    calendar_id = _find_calendar(cal, name)
     if calendar_id:
-        print(f"Reusing calendar '{CALENDAR_NAME}'...")
+        print(f"Reusing calendar '{name}'...")
         _wipe_events(cal, calendar_id)
     else:
-        print(f"Creating calendar '{CALENDAR_NAME}'...")
-        calendar_id = cal.calendars().insert(body={"summary": CALENDAR_NAME, "timeZone": TIME_ZONE}).execute()["id"]
+        print(f"Creating calendar '{name}'...")
+        calendar_id = cal.calendars().insert(body={"summary": name, "timeZone": TIME_ZONE}).execute()["id"]
 
     color_hues = _color_hues(cal.colors().get().execute()["event"])
     color_ids = {key: _nearest_color_id(hue, color_hues) for key, hue in showing_hues(rows).items()}

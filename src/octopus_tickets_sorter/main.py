@@ -182,6 +182,10 @@ def parse_args():
     )
     parser.add_argument("--credentials", type=Path, default=ROOT_DIR / "credentials.json", help="OAuth client secrets file")
     parser.add_argument("--token", type=Path, default=ROOT_DIR / "token.json", help="cached OAuth token file")
+    parser.add_argument(
+        "--config", type=Path, default=ROOT_DIR / "config.toml",
+        help="config file holding the Drive folder/Sheet/Calendar name (created interactively if missing)",
+    )
     args = parser.parse_args()
     if args.create_calendar and not args.upload_drive:
         parser.error("--create-calendar requires --upload-drive")
@@ -242,16 +246,18 @@ def main():
     print(f"wrote {len(rows)} tickets and {len(duplicate_rows)} duplicates to {OUTPUT_DIR}")
 
     if args.upload_drive:
+        from .config import load_name
         from .drive_upload import upload_to_drive
 
-        folder_url, sheet_url = upload_to_drive(rows, duplicate_rows, OUTPUT_DIR, args.credentials, args.token)
+        name = load_name(args.config)
+        folder_url, sheet_url = upload_to_drive(rows, duplicate_rows, OUTPUT_DIR, name, args.credentials, args.token)
         print(f"Drive folder: {folder_url}")
         print(f"Sheet: {sheet_url}")
 
         if args.create_calendar:
             from .calendar_upload import create_calendar
 
-            calendar_url = create_calendar(rows, args.credentials, args.token)
+            calendar_url = create_calendar(rows, name, args.credentials, args.token)
             print(f"Calendar: {calendar_url}")
 
 

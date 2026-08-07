@@ -21,8 +21,6 @@ HEADER = [
     "section", "reservation_code", "ticket_code", "ticket_pdf",
 ]
 
-ROOT_FOLDER_NAME = "Octopus 2026 Tickets"
-SHEET_NAME = "Octopus 2026 Tickets"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 
@@ -144,15 +142,17 @@ def _write_table(sheets, spreadsheet_id: str, sheet_id: int, title: str, rows: l
     ).execute()
 
 
-def upload_to_drive(rows: list, duplicate_rows: list, output_dir: Path, credentials_path: Path, token_path: Path) -> tuple[str, str]:
+def upload_to_drive(
+    rows: list, duplicate_rows: list, output_dir: Path, name: str, credentials_path: Path, token_path: Path
+) -> tuple[str, str]:
     creds = get_credentials(credentials_path, token_path)
     drive = build("drive", "v3", credentials=creds)
     sheets = build("sheets", "v4", credentials=creds)
 
-    root_id = _find_or_create_folder(drive, ROOT_FOLDER_NAME)
-    sheet_id_existing = _find(drive, SHEET_NAME, SHEET_MIME, root_id)
+    root_id = _find_or_create_folder(drive, name)
+    sheet_id_existing = _find(drive, name, SHEET_MIME, root_id)
 
-    print(f"Wiping previous contents of '{ROOT_FOLDER_NAME}'...")
+    print(f"Wiping previous contents of '{name}'...")
     _wipe_children(drive, root_id, keep_id=sheet_id_existing)
 
     tickets_id = _create_folder(drive, "tickets", root_id)
@@ -183,17 +183,17 @@ def upload_to_drive(rows: list, duplicate_rows: list, output_dir: Path, credenti
             drive.files().create(body={"name": csv_name, "parents": [root_id]}, media_body=media).execute()
 
     if sheet_id_existing:
-        print(f"Reusing spreadsheet '{SHEET_NAME}'...")
+        print(f"Reusing spreadsheet '{name}'...")
         spreadsheet_id = sheet_id_existing
         meta = sheets.spreadsheets().get(spreadsheetId=spreadsheet_id, fields="sheets.properties").execute()
         sheet_ids = {s["properties"]["title"]: s["properties"]["sheetId"] for s in meta["sheets"]}
         for title in ("Tickets", "Duplicates"):
             sheets.spreadsheets().values().clear(spreadsheetId=spreadsheet_id, range=title).execute()
     else:
-        print(f"Creating spreadsheet '{SHEET_NAME}'...")
+        print(f"Creating spreadsheet '{name}'...")
         created = sheets.spreadsheets().create(
             body={
-                "properties": {"title": SHEET_NAME},
+                "properties": {"title": name},
                 "sheets": [{"properties": {"title": "Tickets"}}, {"properties": {"title": "Duplicates"}}],
             },
             fields="spreadsheetId,sheets.properties",
