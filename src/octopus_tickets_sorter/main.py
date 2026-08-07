@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pypdf
 
+from .config import load_upload_flags
+
 ROOT_DIR = Path(__file__).resolve().parents[2]
 INPUT_DIR = ROOT_DIR / "input"
 OUTPUT_DIR = ROOT_DIR / "output"
@@ -170,7 +172,10 @@ def write_csv(csv_path: Path, rows: list) -> None:
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--upload-drive", action="store_true", help="upload output to Google Drive and build a linked Sheet")
+    parser.add_argument(
+        "--upload-drive", action="store_true",
+        help="upload output to Google Drive and build a linked Sheet (also settable as upload_drive in config.toml)",
+    )
     parser.add_argument(
         "--rename-input", action="store_true",
         help="rename each PDF in input/ in place to what it would be named as a ticket PDF",
@@ -178,17 +183,23 @@ def parse_args():
     parser.add_argument(
         "--create-calendar", action="store_true",
         help="also create a Google Calendar with one event per showing, linking each attendee's ticket "
-             "(requires --upload-drive, since events link to the uploaded tickets)",
+             "(requires --upload-drive, since events link to the uploaded tickets; "
+             "also settable as create_calendar in config.toml)",
     )
     parser.add_argument("--credentials", type=Path, default=ROOT_DIR / "credentials.json", help="OAuth client secrets file")
     parser.add_argument("--token", type=Path, default=ROOT_DIR / "token.json", help="cached OAuth token file")
     parser.add_argument(
         "--config", type=Path, default=ROOT_DIR / "config.toml",
-        help="config file holding the Drive folder/Sheet/Calendar name (created interactively if missing)",
+        help="config file holding the Drive folder/Sheet/Calendar name and upload flags (created interactively if missing)",
     )
     args = parser.parse_args()
+
+    flags = load_upload_flags(args.config)
+    args.upload_drive = args.upload_drive or flags["upload_drive"]
+    args.create_calendar = args.create_calendar or flags["create_calendar"]
+
     if args.create_calendar and not args.upload_drive:
-        parser.error("--create-calendar requires --upload-drive")
+        parser.error("--create-calendar requires --upload-drive (set either as a CLI flag or in config.toml)")
     return args
 
 

@@ -86,6 +86,19 @@ name on the command line and creates the file for you, so future runs don't
 ask again. Edit the file (or delete it to be asked again) to change the
 name; custom path: `--config PATH`.
 
+### Setting flags via config.toml
+
+`--upload-drive` and `--create-calendar` can also be set as booleans in
+`config.toml`, so you don't have to pass them on every run:
+
+```toml
+upload_drive = true
+create_calendar = true
+```
+
+A flag is on if either the CLI flag or the config value is true; the CLI
+flag never turns one off that the config enabled.
+
 ### One-time setup: Google Cloud OAuth client
 
 This needs an OAuth client so the script can act as you against your own
