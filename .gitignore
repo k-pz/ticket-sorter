@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Generated output (wiped and rebuilt on each run)
+/output/
+
+# Real ticket PDFs (names + reservation codes)
+/input/
+
+# Google OAuth secrets (never commit)
+/credentials.json
+/token.json
+
+# macOS
+.DS_Store
