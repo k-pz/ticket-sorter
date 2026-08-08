@@ -101,25 +101,3 @@ def merge_names(counts: Counter, aliases: dict[str, str]) -> dict[str, str]:
 
         aliases = collapse(aliases, set(selected), keep, counts)
         print(f'  collapsed {len(selected)} names into "{keep}".')
-
-
-if __name__ == "__main__":
-    # Grouping is transitive: a name bridging two groups merges them.
-    assert look_alikes(["Ala Kot", "Ola Pies", "Ala Pies"]) == [["Ala Kot", "Ala Pies", "Ola Pies"]]
-    assert look_alikes(["Jane", "Jane Doe", "Jan Kowalski"]) == [["Jane", "Jane Doe"]]
-    # strict keeps the containments (equal parts count) and drops a shared surname alone.
-    for pair, expected in [
-        (["PAWEŁ ŻAK", "PAWEŁ ZAK"], 1),
-        (["Joe", "Joe “Rocket” Doe"], 1),
-        (["Janina Kowalska", "Janina Kowalska-WIŚNIEWSKA"], 1),
-        (["Jan Nowak", "Anna Nowak"], 0),
-    ]:
-        assert len(look_alikes(pair)) == 1, pair
-        assert len(look_alikes(pair, strict=True)) == expected, pair
-
-    a = collapse({}, {"Joe"}, "Joe Doe", known=["Joe", "Joe Doe"])
-    assert a == {"Joe": "Joe Doe"}, a
-    # Merging again rewires the first alias instead of chaining it through the old name.
-    b = collapse(a, {"Joe Doe", "J. D."}, "J. D.", known=[*a, "J. D."])
-    assert b == {"Joe": "J. D.", "Joe Doe": "J. D."}, b
-    print("ok")

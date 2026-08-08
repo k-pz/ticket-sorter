@@ -41,18 +41,3 @@ def _pastel(hue: float) -> dict:
 def showing_colors(rows: list) -> dict[tuple, dict]:
     """Pastel RGB color (0-1 floats) per distinct showing found in rows."""
     return {key: _pastel(hue) for key, hue in showing_hues(rows).items()}
-
-
-if __name__ == "__main__":
-    # Worst case (proven by sweeping n up to 200) is 0.25, at n=3 and n=4;
-    # it only improves toward 0.5 (complementary) as n grows.
-    for n in range(1, 60):
-        rows = [{"start_time": i, "movie": "m", "address": "a", "issued_to": f"p{i}"} for i in range(n)]
-        assert len(set(person_hues(rows).values())) == n
-        hues = showing_hues(rows)
-        values = [hues[showing_key(t)] for t in rows]
-        assert all(0 <= h < 1 for h in values)
-        for a, b in zip(values, values[1:]):
-            dist = abs(a - b) % 1.0
-            assert min(dist, 1.0 - dist) >= 0.25, (n, a, b)
-    print("ok")

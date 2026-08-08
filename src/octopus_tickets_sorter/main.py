@@ -133,7 +133,9 @@ def parse_ticket(path: Path):
     while lines and lines[-1] == "":
         lines.pop()
     i = next((n for n, l in enumerate(lines) if DATE_RE.match(l)), None)
-    if i is None:
+    # Anything short of a title line at +11 and an organizer line after it isn't a ticket,
+    # whatever matched the date: a stray receipt in input/ is skipped, not read past.
+    if i is None or len(lines) <= i + 12:
         return None
     # ponytail: fixed offsets from the date line, holds because every
     # biletomat.pl export uses the same field order. Movie title fills

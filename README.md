@@ -353,3 +353,15 @@ revoking access, or the first time you add `--create-calendar` to a session
 that already had a cached token (it was authorized without calendar access).
 
 Custom paths for either file: `--credentials PATH` / `--token PATH`.
+
+## Tests
+
+```sh
+uv run pytest
+```
+
+Nothing in the suite talks to Google or reads the real `input/`, `output/` or
+`config.toml`. Ticket PDFs are generated with pypdf and parsed back through it,
+and the Google clients are real `googleapiclient` services running on
+`HttpMockSequence`, so requests are still built and checked against each API's
+discovery document.
