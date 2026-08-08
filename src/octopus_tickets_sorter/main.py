@@ -6,12 +6,14 @@ import re
 import shutil
 import sys
 import unicodedata
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pypdf
 
-from .config import load_upload_flags
+from .config import load_aliases, load_duplicates, load_name, load_upload_flags, save_tables
+from .names import look_alikes, merge_names, resolve
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 INPUT_DIR = ROOT_DIR / "input"
@@ -181,8 +183,13 @@ def parse_args():
         help="rename each PDF in input/ in place to what it would be named as a ticket PDF",
     )
     parser.add_argument(
+        "--merge-names", action="store_true",
+        help="before sorting, ask which of the names tickets were issued to are the same person, "
+             "and save the answers as an [aliases] table in config.toml",
+    )
+    parser.add_argument(
         "--create-calendar", action="store_true",
-        help="also create a Google Calendar with one event per showing, linking each attendee's ticket "
+        help="also create one Google Calendar per ticket holder, with an event per showing linking their ticket "
              "(requires --upload-drive, since events link to the uploaded tickets; "
              "also settable as create_calendar in config.toml)",
     )
@@ -206,22 +213,63 @@ def parse_args():
 def main():
     args = parse_args()
 
-    shutil.rmtree(OUTPUT_DIR, ignore_errors=True)
-    OUTPUT_DIR.mkdir(parents=True)
-
-    rows, duplicate_rows = [], []
-    seen_shows = set()
+    tickets = []
     for pdf in sorted(INPUT_DIR.glob("*.pdf")):
         ticket = parse_ticket(pdf)
         if ticket is None:
             print(f"skip (unrecognized layout): {pdf.name}", file=sys.stderr)
             continue
+        ticket["source"] = pdf
+        tickets.append(ticket)
 
+    # One person can have tickets issued to several spellings of their name; the
+    # saved aliases collapse those before anything is grouped by ticket holder.
+    stored_aliases = load_aliases(args.config)
+    aliases = stored_aliases
+    if args.merge_names:
+        aliases = merge_names(Counter(t["issued_to"] for t in tickets), stored_aliases)
+    for t in tickets:
+        t["issued_to"] = resolve(t["issued_to"], aliases)
+    if not args.merge_names:
+        for group in look_alikes({t["issued_to"] for t in tickets}, strict=True):
+            print(
+                f"note: {' / '.join(group)} may be one person — re-run with --merge-names to collapse them",
+                file=sys.stderr,
+            )
+
+    # Showings handed back by putting DUPLICATE in front of their calendar event. Read
+    # before the calendars are rebuilt, since that wipes the marks, and remembered here
+    # so the ticket stays a duplicate once its event is gone.
+    name = load_name(args.config) if args.upload_drive else None
+    stored_duplicates = load_duplicates(args.config)
+    marked = set(stored_duplicates)
+    if args.create_calendar:
+        from .calendar_upload import read_duplicate_marks
+
+        marked |= read_duplicate_marks(name, tickets, aliases, args.credentials, args.token)
+    labels = {
+        t["reservation_code"]: f"{t['issued_to']} – {t['movie']}, {t['start_time']:%Y-%m-%d %H:%M}"
+        for t in tickets
+    }
+    duplicates = {code: labels.get(code, stored_duplicates.get(code, "")) for code in marked}
+    if (aliases, duplicates) != (stored_aliases, stored_duplicates):
+        save_tables(args.config, aliases, duplicates)
+
+    shutil.rmtree(OUTPUT_DIR, ignore_errors=True)
+    OUTPUT_DIR.mkdir(parents=True)
+
+    rows, duplicate_rows = [], []
+    seen_shows = set()
+    for ticket in tickets:
+        source = ticket["source"]
         # A "show" is one person's booking for one screening; any ticket beyond
-        # the first for the same show is a duplicate.
+        # the first for the same show is a duplicate, as is one marked by hand.
+        # A marked ticket doesn't take the show's slot, so another ticket for the
+        # same show still gets to be the one that counts.
         show_key = (ticket["issued_to"], ticket["movie"], ticket["start_time"], ticket["address"])
-        is_duplicate = show_key in seen_shows
-        seen_shows.add(show_key)
+        is_duplicate = ticket["reservation_code"] in duplicates or show_key in seen_shows
+        if ticket["reservation_code"] not in duplicates:
+            seen_shows.add(show_key)
 
         base_name = f"{slugify(ticket['movie'])}-{ticket['reservation_code']}"
         if is_duplicate:
@@ -235,16 +283,16 @@ def main():
         if new_path.exists():
             print(f"skip copy (target exists): {new_path.name}", file=sys.stderr)
         else:
-            shutil.copy2(pdf, new_path)
+            shutil.copy2(source, new_path)
         ticket["file"] = str(new_path.relative_to(OUTPUT_DIR))
 
         if args.rename_input:
-            renamed = pdf.with_name(new_path.name)
-            if renamed != pdf:
+            renamed = source.with_name(new_path.name)
+            if renamed != source:
                 if renamed.exists():
                     print(f"skip rename (target exists): {renamed.name}", file=sys.stderr)
                 else:
-                    pdf.rename(renamed)
+                    source.rename(renamed)
 
         (duplicate_rows if is_duplicate else rows).append(ticket)
 
@@ -257,19 +305,17 @@ def main():
     print(f"wrote {len(rows)} tickets and {len(duplicate_rows)} duplicates to {OUTPUT_DIR}")
 
     if args.upload_drive:
-        from .config import load_name
         from .drive_upload import upload_to_drive
 
-        name = load_name(args.config)
         folder_url, sheet_url = upload_to_drive(rows, duplicate_rows, OUTPUT_DIR, name, args.credentials, args.token)
         print(f"Drive folder: {folder_url}")
         print(f"Sheet: {sheet_url}")
 
         if args.create_calendar:
-            from .calendar_upload import create_calendar
+            from .calendar_upload import create_calendars
 
-            calendar_url = create_calendar(rows, name, args.credentials, args.token)
-            print(f"Calendar: {calendar_url}")
+            for person, calendar_url in create_calendars(rows, name, args.credentials, args.token).items():
+                print(f"Calendar ({person}): {calendar_url}")
 
 
 if __name__ == "__main__":

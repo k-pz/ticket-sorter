@@ -1,104 +1,306 @@
-"""Create a Google Calendar with one event per showing, linking each attendee's uploaded ticket."""
+"""Create one Google Calendar per ticket holder, with an event per showing linking their uploaded ticket."""
 import colorsys
-from datetime import timedelta
+import re
+import sys
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 from googleapiclient.discovery import build
 
-from .colors import showing_hues, showing_key
-from .drive_upload import get_credentials
+from .colors import person_hues
+from .drive_upload import execute, get_credentials
+from .names import resolve
 
 TIME_ZONE = "Europe/Warsaw"
 FALLBACK_LENGTH_MIN = 90  # used only if a movie's runtime is unknown
+SEPARATOR = " – "  # a person's calendar is titled "<name><SEPARATOR><person>"
+CREATE_PAUSE_S = 1.0  # breathing room between calendar creations, which are rationed hardest
+
+# What someone types in front of an event title to hand that showing back.
+DUPLICATE_MARK = re.compile(r"^\s*DUPLICATE\b[\s:–—-]*", re.IGNORECASE)
 
 
-def _find_calendar(cal, name: str) -> str | None:
-    page_token = None
+def _owned_calendars(cal) -> list[dict]:
+    """Every calendar the account owns. Calendars merely subscribed to are skipped:
+    they aren't ours to delete, and we'd fail trying."""
+    entries, page_token = [], None
     while True:
-        page = cal.calendarList().list(pageToken=page_token).execute()
-        for entry in page.get("items", []):
-            if entry["summary"] == name:
-                return entry["id"]
+        page = execute(cal.calendarList().list(pageToken=page_token), "calendar list")
+        entries += [e for e in page.get("items", []) if e.get("accessRole") == "owner"]
         page_token = page.get("nextPageToken")
         if not page_token:
-            return None
+            return entries
 
 
-def _wipe_events(cal, calendar_id: str) -> None:
-    page_token = None
+def _partition(entries, name: str, wanted: set[str]) -> tuple[dict[str, dict], list[dict]]:
+    """Split the account's calendars into the ones this run reuses (by title) and the
+    ones it should delete: the single shared calendar older versions created, calendars
+    for people this run has no tickets for — someone who dropped out, or a name spelling
+    since merged away — and same-title leftovers. Anything not ours is left alone."""
+    keep, drop = {}, []
+    for entry in entries:
+        title = entry["summary"]
+        if title in wanted and title not in keep:
+            keep[title] = entry
+        elif title == name or title.startswith(f"{name}{SEPARATOR}"):
+            drop.append(entry)
+    return keep, drop
+
+
+def _events(cal, calendar_id: str) -> list[dict]:
+    events, page_token = [], None
     while True:
-        page = cal.events().list(calendarId=calendar_id, pageToken=page_token).execute()
-        for event in page.get("items", []):
-            cal.events().delete(calendarId=calendar_id, eventId=event["id"]).execute()
+        page = execute(cal.events().list(calendarId=calendar_id, pageToken=page_token), "event list")
+        events += page.get("items", [])
         page_token = page.get("nextPageToken")
         if not page_token:
-            return
+            return events
 
 
-def _group_showings(rows: list) -> dict[tuple, list]:
-    """One entry per distinct (start_time, movie, address) showing."""
-    showings: dict[tuple, list] = {}
-    for t in rows:
-        showings.setdefault(showing_key(t), []).append(t)
-    return showings
+def _is_public_writer(rule: dict) -> bool:
+    return rule.get("scope", {}).get("type") == "default" and rule.get("role") == "writer"
 
 
-def _hls(hex_color: str) -> tuple[float, float, float]:
-    hex_color = hex_color.lstrip("#")
-    r, g, b = (int(hex_color[i:i + 2], 16) / 255 for i in (0, 2, 4))
-    return colorsys.rgb_to_hls(r, g, b)
+def _share(cal, calendar_id: str) -> bool:
+    """Let anyone holding the calendar's link edit it, and say whether that had to be
+    changed. Calendar has no "anyone with the link" tier the way Drive does — scope
+    "default" means public, so the calendar's id is the only thing gating access.
+    The rule is read first so a calendar already shared costs no write."""
+    rules = execute(cal.acl().list(calendarId=calendar_id), "sharing rules").get("items", [])
+    if any(_is_public_writer(rule) for rule in rules):
+        return False
+    execute(
+        cal.acl().insert(calendarId=calendar_id, body={"role": "writer", "scope": {"type": "default"}}),
+        "sharing rule",
+    )
+    return True
 
 
-def _hue_distance(a: float, b: float) -> float:
-    d = abs(a - b) % 1.0
-    return min(d, 1.0 - d)
+def _code_of(event: dict) -> str | None:
+    return event.get("extendedProperties", {}).get("private", {}).get("reservation_code")
 
 
-def _color_hues(event_colors: dict[str, dict]) -> dict[str, float]:
-    """Hue per colorId, excluding Graphite (grey, no real hue) so it never wins a match by coincidence."""
-    hls = {color_id: _hls(definition["background"]) for color_id, definition in event_colors.items()}
-    return {color_id: h for color_id, (h, _l, s) in hls.items() if s > 0.1}
+def _differs(event: dict, body: dict) -> bool:
+    """Whether a calendar event still says what this run wants it to say. Start/end are
+    compared without the UTC offset Google echoes back on them."""
+    if any(event.get(field) != body[field] for field in ("summary", "location", "description")):
+        return True
+    return any(event.get(k, {}).get("dateTime", "")[:19] != body[k]["dateTime"][:19] for k in ("start", "end"))
 
 
-def _nearest_color_id(hue: float, hues_by_color_id: dict[str, float]) -> str:
-    """Calendar events only support Google's fixed 11-color palette, so match the Sheet's pastel by hue."""
-    return min(hues_by_color_id, key=lambda cid: _hue_distance(hue, hues_by_color_id[cid]))
+def _sync_events(cal, calendar_id: str, tickets: list) -> tuple[int, int, int]:
+    """Bring a calendar's events in line with tickets, writing only where they differ.
+    Returns (added, updated, removed).
+
+    Deleting every event and re-inserting it is what makes a run cost a couple of
+    hundred calendar writes and get rate limited; matching on the reservation code each
+    event carries means a re-run with nothing new costs only the read. It also puts back
+    a title someone edited, so an unresolved DUPLICATE mark doesn't linger."""
+    existing, stale = {}, []
+    for event in _events(cal, calendar_id):
+        code = _code_of(event)
+        if code and code not in existing:
+            existing[code] = event
+        else:
+            stale.append(event)  # untagged (predates tagging) or a same-code leftover
+
+    added = updated = 0
+    for t in tickets:
+        body = _event_body(t)
+        event = existing.pop(t["reservation_code"], None)
+        if event is None:
+            execute(cal.events().insert(calendarId=calendar_id, body=body), "event insert")
+            added += 1
+        elif _differs(event, body):
+            execute(cal.events().update(calendarId=calendar_id, eventId=event["id"], body=body), "event update")
+            updated += 1
+
+    removed = stale + list(existing.values())
+    for event in removed:
+        execute(cal.events().delete(calendarId=calendar_id, eventId=event["id"]), "event delete")
+    return added, updated, len(removed)
 
 
-def _event_body(key: tuple, tickets: list, color_id: str) -> dict:
-    start_time, movie, address = key
-    end_time = tickets[0]["end_time"] or start_time + timedelta(minutes=FALLBACK_LENGTH_MIN)
-    lines = [f"Section: {tickets[0]['section']}", ""]
-    lines += [f'<a href="{t["drive_link"]}">{t["issued_to"]}\'s ticket</a>' for t in tickets]
-    return {
-        "summary": movie,
-        "location": address,
-        "description": "<br>".join(lines),
-        "start": {"dateTime": start_time.isoformat(), "timeZone": TIME_ZONE},
-        "end": {"dateTime": end_time.isoformat(), "timeZone": TIME_ZONE},
-        "colorId": color_id,
-    }
+def _marked_code(event: dict, person: str, by_showing: dict) -> str | None:
+    """The reservation code of an event retitled with a DUPLICATE prefix, or None if it
+    isn't marked. The code is read off the private property every event is created with;
+    matching the showing is a fallback for events made before this run started tagging them."""
+    summary = event.get("summary", "")
+    if not DUPLICATE_MARK.match(summary):
+        return None
+    code = event.get("extendedProperties", {}).get("private", {}).get("reservation_code")
+    start = event.get("start", {}).get("dateTime", "")[:16]  # "2026-08-11T21:30", offset dropped
+    return code or by_showing.get((person, DUPLICATE_MARK.sub("", summary), start))
 
 
-def create_calendar(rows: list, name: str, credentials_path: Path, token_path: Path) -> str:
+def read_duplicate_marks(
+    name: str, tickets: list, aliases: dict, credentials_path: Path, token_path: Path
+) -> set[str]:
+    """Reservation codes for showings someone handed back by putting DUPLICATE in front of
+    the event title. Read before the calendars are rebuilt, since that wipes the marks."""
     creds = get_credentials(credentials_path, token_path)
     cal = build("calendar", "v3", credentials=creds)
 
-    calendar_id = _find_calendar(cal, name)
-    if calendar_id:
-        print(f"Reusing calendar '{name}'...")
-        _wipe_events(cal, calendar_id)
-    else:
-        print(f"Creating calendar '{name}'...")
-        calendar_id = cal.calendars().insert(body={"summary": name, "timeZone": TIME_ZONE}).execute()["id"]
+    by_showing = {
+        (t["issued_to"], t["movie"], t["start_time"].strftime("%Y-%m-%dT%H:%M")): t["reservation_code"]
+        for t in tickets
+    }
+    codes = set()
+    for entry in _owned_calendars(cal):
+        title = entry["summary"]
+        if not title.startswith(f"{name}{SEPARATOR}"):
+            continue
+        # Through the aliases too: a calendar still titled with a name spelling that has
+        # since been merged away is about the person that spelling now collapses into.
+        person = resolve(title[len(name) + len(SEPARATOR):], aliases)
+        for event in _events(cal, entry["id"]):
+            if not DUPLICATE_MARK.match(event.get("summary", "")):
+                continue
+            if code := _marked_code(event, person, by_showing):
+                codes.add(code)
+            else:
+                print(
+                    f"note: can't tell which ticket '{event.get('summary', '')}' in {title} is; "
+                    "re-run once so its event carries a reservation code, then mark it again",
+                    file=sys.stderr,
+                )
+    return codes
 
-    color_hues = _color_hues(cal.colors().get().execute()["event"])
-    color_ids = {key: _nearest_color_id(hue, color_hues) for key, hue in showing_hues(rows).items()}
 
-    showings = _group_showings(rows)
-    print(f"Adding {len(showings)} showings to the calendar...")
-    for key, tickets in showings.items():
-        body = _event_body(key, tickets, color_ids[key])
-        cal.events().insert(calendarId=calendar_id, body=body).execute()
+def _hex(hue: float) -> str:
+    """Calendar colors are per-calendar (not per-event), so any RGB works — no palette matching needed."""
+    r, g, b = colorsys.hls_to_rgb(hue, 0.45, 0.6)
+    return "#{:02x}{:02x}{:02x}".format(round(r * 255), round(g * 255), round(b * 255))
 
-    return f"https://calendar.google.com/calendar/r?cid={calendar_id}"
+
+def _event_body(t: dict) -> dict:
+    end_time = t["end_time"] or t["start_time"] + timedelta(minutes=FALLBACK_LENGTH_MIN)
+    return {
+        "summary": t["movie"],
+        "location": t["address"],
+        "description": f'Section: {t["section"]}<br><br><a href="{t["drive_link"]}">Ticket</a>',
+        "start": {"dateTime": t["start_time"].isoformat(), "timeZone": TIME_ZONE},
+        "end": {"dateTime": end_time.isoformat(), "timeZone": TIME_ZONE},
+        # Survives the title being edited, so a DUPLICATE-marked event still names its ticket.
+        "extendedProperties": {"private": {"reservation_code": t["reservation_code"]}},
+    }
+
+
+def create_calendars(rows: list, name: str, credentials_path: Path, token_path: Path) -> dict[str, str]:
+    """One calendar per person, each in its own color. Returns {person: calendar url}."""
+    creds = get_credentials(credentials_path, token_path)
+    cal = build("calendar", "v3", credentials=creds)
+
+    by_person: dict[str, list] = {}
+    for t in rows:
+        by_person.setdefault(t["issued_to"], []).append(t)
+
+    print(f"Syncing calendars for '{name}'...")
+    existing, stale = _partition(
+        _owned_calendars(cal), name, {f"{name}{SEPARATOR}{person}" for person in by_person}
+    )
+    for entry in stale:
+        print(f"  deleting {entry['summary']}")
+        execute(cal.calendars().delete(calendarId=entry["id"]), "calendar delete")
+
+    hues = person_hues(rows)
+    urls = {}
+    for person, tickets in by_person.items():
+        title = f"{name}{SEPARATOR}{person}"
+        entry = existing.get(title)
+        if entry:
+            print(f"Reusing calendar '{title}'...")
+            calendar_id = entry["id"]
+        else:
+            print(f"Creating calendar '{title}'...")
+            created = execute(
+                cal.calendars().insert(body={"summary": title, "timeZone": TIME_ZONE}), "calendar create"
+            )
+            calendar_id = created["id"]
+            # Creating calendars is rationed far more tightly than writing events, and
+            # going over is a cooldown rather than a momentary throttle, so don't race.
+            time.sleep(CREATE_PAUSE_S)
+
+        color = _hex(hues[person])
+        if not entry or entry.get("backgroundColor") != color:
+            execute(
+                cal.calendarList().patch(
+                    calendarId=calendar_id,
+                    colorRgbFormat=True,
+                    body={"backgroundColor": color, "foregroundColor": "#ffffff"},
+                ),
+                "calendar color",
+            )
+
+        if _share(cal, calendar_id):
+            print("  shared: anyone with the link can edit")
+
+        added, updated, removed = _sync_events(cal, calendar_id, tickets)
+        print(f"  {len(tickets)} showings: {added} added, {updated} updated, {removed} removed")
+
+        urls[person] = "https://calendar.google.com/calendar/r?cid=" + quote(calendar_id)
+
+    return urls
+
+
+if __name__ == "__main__":
+    # _partition keeps one calendar per person this run has tickets for, and hands
+    # back everything else of ours — including calendars left behind by names that
+    # have since been merged into another spelling.
+    keep, drop = _partition(
+        [
+            {"summary": "Octopus – Anna", "id": "1"},
+            {"summary": "Octopus – Anna", "id": "2"},          # same-title leftover
+            {"summary": "Octopus – Ania", "id": "3"},        # merged away into "Anna"
+            {"summary": "Octopus", "id": "4"},                  # the old shared calendar
+            {"summary": "Octopus Shorts – Blok 1", "id": "5"},  # not ours: no "Octopus – " prefix
+            {"summary": "Holidays", "id": "6"},
+        ],
+        "Octopus",
+        {"Octopus – Anna"},
+    )
+    assert list(keep) == ["Octopus – Anna"] and keep["Octopus – Anna"]["id"] == "1", keep
+    assert [e["id"] for e in drop] == ["2", "3", "4"], drop
+
+    # _differs decides whether an existing event needs rewriting at all. Google echoes
+    # start/end back with a UTC offset the body doesn't carry; that alone isn't a change.
+    body = _event_body({
+        "movie": "Motor City", "address": "Kino", "section": "Sekcja", "drive_link": "https://d/x",
+        "reservation_code": "ABC123",
+        "start_time": datetime(2026, 8, 11, 21, 30), "end_time": datetime(2026, 8, 11, 23, 13),
+    })
+    same = body | {
+        "start": {"dateTime": "2026-08-11T21:30:00+02:00"},
+        "end": {"dateTime": "2026-08-11T23:13:00+02:00"},
+    }
+    assert not _differs(same, body)
+    assert _differs(same | {"summary": "DUPLICATE Motor City"}, body)  # an edited title is put back
+    assert _differs(same | {"start": {"dateTime": "2026-08-11T22:00:00+02:00"}}, body)
+    assert _code_of(body) == "ABC123"
+
+    # _marked_code reads the code off the event, whatever was typed in front of the title.
+    tagged = {"extendedProperties": {"private": {"reservation_code": "DEF456"}}}
+    for summary, expected in [
+        ("Motor City", None),
+        ("DUPLICATE Motor City", "DEF456"),
+        ("duplicate: Motor City", "DEF456"),
+        ("DUPLICATE – Motor City", "DEF456"),
+        ("Duplicates of Vice", None),  # \b, so only the whole word counts
+    ]:
+        assert _marked_code(tagged | {"summary": summary}, "Anna", {}) == expected, summary
+
+    # Events made before the code was attached fall back to matching the showing.
+    by_showing = {("Anna", "Motor City", "2026-08-11T21:30"): "ABC123"}
+    untagged = {"summary": "DUPLICATE Motor City", "start": {"dateTime": "2026-08-11T21:30:00+02:00"}}
+    assert _marked_code(untagged, "Anna", by_showing) == "ABC123"
+    assert _marked_code(untagged, "Someone Else", by_showing) is None
+
+    # Only a public rule that grants editing counts as already shared; anything
+    # narrower would leave the link useless to the person it's sent to.
+    assert _is_public_writer({"role": "writer", "scope": {"type": "default"}})
+    assert not _is_public_writer({"role": "reader", "scope": {"type": "default"}})
+    assert not _is_public_writer({"role": "writer", "scope": {"type": "user", "value": "a@b.c"}})
+    assert not _is_public_writer({"role": "owner", "scope": {"type": "user", "value": "me@b.c"}})
+    print("ok")

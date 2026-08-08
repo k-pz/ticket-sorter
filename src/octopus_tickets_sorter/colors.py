@@ -6,20 +6,14 @@ def showing_key(t: dict) -> tuple:
     return (t["start_time"], t["movie"], t["address"])
 
 
-def showing_indices(rows: list) -> dict[tuple, int]:
-    """Stable index per distinct showing, in first-seen order."""
-    index: dict[tuple, int] = {}
-    for t in rows:
-        index.setdefault(showing_key(t), len(index))
-    return index
-
-
-def showing_hues(rows: list) -> dict[tuple, float]:
-    """Hue (0-1) per distinct showing found in rows. Consecutive showings
-    (by first-seen order, i.e. by start time) alternate between the two
-    halves of the color wheel — roughly cool vs warm — so neighbors are
-    always near-complementary instead of two slivers of the same hue."""
-    index = showing_indices(rows)
+def _hues(keys: list) -> dict:
+    """Hue (0-1) per distinct key. Consecutive keys (by first-seen order)
+    alternate between the two halves of the color wheel — roughly cool vs
+    warm — so neighbors are always near-complementary instead of two
+    slivers of the same hue."""
+    index: dict = {}
+    for key in keys:
+        index.setdefault(key, len(index))
     n = len(index)
     evens, odds = (n + 1) // 2, n // 2
     hues = {}
@@ -28,6 +22,16 @@ def showing_hues(rows: list) -> dict[tuple, float]:
         count = evens if half == 0 else odds
         hues[key] = half * 0.5 + (pos / count) * 0.5
     return hues
+
+
+def showing_hues(rows: list) -> dict[tuple, float]:
+    """Hue per distinct showing, used for the Sheet's row backgrounds."""
+    return _hues([showing_key(t) for t in rows])
+
+
+def person_hues(rows: list) -> dict[str, float]:
+    """Hue per distinct ticket holder, used for each person's calendar color."""
+    return _hues([t["issued_to"] for t in rows])
 
 
 def _pastel(hue: float) -> dict:
@@ -43,7 +47,8 @@ if __name__ == "__main__":
     # Worst case (proven by sweeping n up to 200) is 0.25, at n=3 and n=4;
     # it only improves toward 0.5 (complementary) as n grows.
     for n in range(1, 60):
-        rows = [{"start_time": i, "movie": "m", "address": "a"} for i in range(n)]
+        rows = [{"start_time": i, "movie": "m", "address": "a", "issued_to": f"p{i}"} for i in range(n)]
+        assert len(set(person_hues(rows).values())) == n
         hues = showing_hues(rows)
         values = [hues[showing_key(t)] for t in rows]
         assert all(0 <= h < 1 for h in values)
