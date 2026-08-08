@@ -103,6 +103,20 @@ them like a normal table.
 The Drive folder and Sheet are both named after the `name` in `config.toml`
 (see below).
 
+Two things are shared by link, so what you hand out actually opens:
+
+- **The Sheet: anyone with its link can edit it.** Drive, unlike Calendar, does
+  allow write access on a link share.
+- **Each ticket PDF: anyone with its link can view it.** That's what makes the
+  Sheet's `ticket_pdf` column and the `Ticket` link in every calendar event work
+  for the person you sent them to, not just for you.
+
+The folders themselves stay private, so the PDFs are reachable only through a
+link someone was given — there's no folder to browse and no way to enumerate
+tickets that weren't shared. Sharing is checked against what's already set (for
+the PDFs, off the folder listing that's read anyway), so a re-run doesn't
+re-share anything: it's ~one extra write per newly uploaded PDF and none after.
+
 Re-running syncs rather than re-uploads: a PDF already in Drive under the
 name this run would give it is left alone (its existing link is reused), and
 only files that this run wouldn't upload — tickets that changed name,
@@ -146,57 +160,71 @@ Notes:
 - If a movie's runtime isn't in the `FILM_LENGTHS_MIN` lookup table in
   `main.py`, its event falls back to a 90-minute length.
 - Each printed `Calendar (<person>):` link opens that person's calendar and, as
-  described below, is all anyone needs to add and edit it.
+  described below, is all anyone needs to add it to their own Google Calendar.
 
 ### Sharing the calendars
 
-Each calendar is shared so that anyone with its link can edit it, which is what
+Each calendar is shared so that anyone with its link can see it, which is what
 the printed `Calendar (<person>):` links are for — send someone theirs and they
-can add it to their own Google Calendar and change it, with no invite to accept
-and nothing for you to approve.
+can add it to their own Google Calendar, with no invite to accept and nothing
+for you to approve.
 
 ```
 Creating calendar 'Octopus 2026 Tickets – Jan Kowalski'...
-  shared: anyone with the link can edit
+  shared: anyone with the link can view
 ```
 
-Be aware of what that actually means, because Google Calendar has no
-"anyone with the link" tier the way Drive does. The only link-based sharing it
-offers is **public**: the calendar is world-readable and world-writable, and its
-id — the long string in the link — is the only thing gating access. It isn't
-restricted to the people you send the link to.
+**A link can only ever carry read access.** Google Calendar has no "anyone with
+the link" tier the way Drive does; its only link-based sharing is *public*, and
+it refuses to pair that with a role that can write:
 
-In practice, for a calendar holding film times, that means:
+```
+400 The default scope cannot be granted a write or owners access role to a calendar.
+```
 
-- Anyone with the link can add, change, and delete events. A run puts back
-  anything deleted or edited, since events are synced against the tickets, so
-  interference is undone rather than permanent.
-- The one edit a run doesn't undo is the `DUPLICATE` prefix below — it's read as
-  a deliberate instruction. Someone with the link can therefore hand back one of
-  your showings, and the run will record it in `config.toml`.
-- Event descriptions link to the ticket PDFs in Drive. Those links are
-  separately permissioned, so a public calendar doesn't expose the PDFs.
+So a calendar can be link-shared, or editable by named people, but not editable
+by whoever holds the link. Editing has to be granted per person, by Google
+account address — see below.
+
+What public sharing does mean, for a calendar holding film times: the calendar
+is world-readable, and its id (the long string in the link) is the only thing
+gating access — it isn't restricted to the people you send it to. Nobody can
+change anything. Each event's description links to that showing's ticket PDF,
+which is itself shared by link so it opens for whoever has the calendar, so a
+public calendar does put those tickets within reach of anyone holding its id.
 
 Re-running doesn't re-share a calendar that's already shared; the rule is read
 first, so this costs nothing once set. To take it back, remove "Make available
 to public" in the calendar's Google Calendar settings — but note the next run
-will set it again. If you'd rather share with named people instead of publicly,
-that's a different sharing rule (per-email, `writer`) and would need their
-addresses in `config.toml`.
+will set it again.
 
-### Handing a showing back from the calendar
+To let someone edit their calendar, share it with their Google account from
+Google Calendar's own settings ("Share with specific people" → their address →
+"Make changes to events"). Runs leave those rules alone, so a person you've
+added stays added.
+
+### Handing a showing back
 
 A ticket you've decided not to use — a genuine double booking, or one you're
-giving away — can be marked straight from the calendar, without going back to
-the PDFs. Rename the event to put `DUPLICATE` in front of its title:
+giving away — can be marked without going back to the PDFs, from either the
+Sheet or the calendar.
+
+**In the Sheet**, tick the `duplicate` checkbox, the column immediately before
+the film title:
+
+| start_time | end_time | length_min | duplicate | movie | … |
+|---|---|---|---|---|---|
+| 2026-08-11 21:30 | 2026-08-11 23:13 | 103 | ☑ | Motor City | … |
+
+**In the calendar**, rename the event to put `DUPLICATE` in front of its title:
 
 ```
 Motor City            ->   DUPLICATE Motor City
 ```
 
-The next run picks it up, records it in `config.toml`, and treats that ticket
-as a duplicate from then on: the PDF moves to `output/duplicates/`, the row
-moves to the `Duplicates` tab, and the showing loses its calendar event.
+Either way the next run picks it up, records it in `config.toml`, and treats
+that ticket as a duplicate from then on: the PDF moves to `output/duplicates/`,
+the row moves to the `Duplicates` tab, and the showing loses its calendar event.
 
 ```toml
 [duplicates]
@@ -204,18 +232,25 @@ moves to the `Duplicates` tab, and the showing loses its calendar event.
 ```
 
 The key is the ticket's reservation code, which is what actually matters; the
-value is a label so the file says what you marked, refreshed on each run. Delete
-a line to hand the showing back to its owner.
+value is a label so the file says what you marked, refreshed on each run.
 
-Marking is read before the calendars are rebuilt, so the mark isn't lost to the
-rebuild — and because it's saved, it keeps applying after the event it was typed
-on is gone. That also means the calendar can't undo it: once marked, edit
-`config.toml` to reverse it.
+**To take a marking back**, untick the row's checkbox on the `Duplicates` tab —
+or delete its line from `config.toml`. The calendar has no way back of its own:
+a marked showing has no event left to edit.
+
+Marks are read before the Sheet and the calendars are rewritten, so they aren't
+lost to the rebuild, and because they're saved they keep applying afterwards.
+Only the two meaningful directions are read — a tick on `Tickets` and an untick
+on `Duplicates`. A ticked row on `Duplicates` and an unticked one on `Tickets`
+are just their normal state, so leaving them alone is not an instruction.
 
 Notes:
 
-- The prefix is matched case-insensitively, as a whole word, and may be followed
-  by a separator — `DUPLICATE Motor City`, `duplicate: Motor City`, and
+- Only manual marks can be unticked back. A ticket that's a duplicate because
+  you hold two for the same showing is detected fresh each run, so unticking it
+  lasts until the next run.
+- The calendar prefix is matched case-insensitively, as a whole word, and may be
+  followed by a separator — `DUPLICATE Motor City`, `duplicate: Motor City`, and
   `DUPLICATE – Motor City` all work. A film whose real title starts with
   "Duplicates" is not affected.
 - Each event carries its reservation code as a private property, so the mark

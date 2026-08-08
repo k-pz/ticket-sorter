@@ -3,6 +3,7 @@ import json
 import random
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -26,10 +27,14 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar",
 ]
 
+# "duplicate" is a checkbox sitting right before the film, for handing a showing back
+# from the Sheet the way the DUPLICATE prefix does from a calendar.
 HEADER = [
-    "start_time", "end_time", "length_min", "movie", "issued_to", "address",
+    "start_time", "end_time", "length_min", "duplicate", "movie", "issued_to", "address",
     "section", "reservation_code", "ticket_code", "ticket_pdf",
 ]
+DUPLICATE_COL = HEADER.index("duplicate")
+CODE_COL = HEADER.index("reservation_code")
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
@@ -118,7 +123,10 @@ def _sync(drive, folder_id: str, wanted: set[str]) -> dict[str, dict]:
     """Trash whatever in folder_id isn't named in wanted; return the survivors by name."""
     q = f"'{folder_id}' in parents and trashed = false"
     keep: dict[str, dict] = {}
-    files = execute(drive.files().list(q=q, fields="files(id,name,mimeType,webViewLink)", pageSize=1000), "folder listing")
+    # permissions comes along for the ride, so checking what's already link-shared
+    # costs no request of its own.
+    fields = "files(id,name,mimeType,webViewLink,permissions(type,role))"
+    files = execute(drive.files().list(q=q, fields=fields, pageSize=1000), "folder listing")
     for f in files.get("files", []):
         if f["name"] in wanted and f["name"] not in keep:
             keep[f["name"]] = f
@@ -133,18 +141,92 @@ def _child_folder(drive, existing: dict, name: str, parent_id: str) -> str:
     return entry["id"] if entry else _create_folder(drive, name, parent_id)
 
 
+def _link_shared_as(permissions, role: str) -> bool:
+    return any(p.get("type") == "anyone" and p.get("role") == role for p in permissions or [])
+
+
+def _link_share(drive, file_id: str, role: str, what: str) -> None:
+    execute(drive.permissions().create(fileId=file_id, body={"role": role, "type": "anyone"}), what)
+
+
+def _share_listed(drive, file: dict) -> bool:
+    """Make a already-uploaded PDF readable by anyone holding its link, so the ticket
+    links in the Sheet and in calendar events open for whoever they were sent to.
+    The permissions came with the folder listing, so a file already shared costs
+    nothing; a listing that omits them costs a redundant share rather than a dead link."""
+    if _link_shared_as(file.get("permissions"), "reader"):
+        return False
+    _link_share(drive, file["id"], "reader", "file sharing")
+    return True
+
+
 def _upload_file(drive, path: Path, parent_id: str) -> str:
     media = MediaFileUpload(str(path), mimetype="application/pdf")
     body = {"name": path.name, "parents": [parent_id]}
     file = execute(drive.files().create(body=body, media_body=media, fields="id,webViewLink"), "file upload")
+    _link_share(drive, file["id"], "reader", "file sharing")  # freshly created: never shared yet
     return file["webViewLink"]
 
 
-def _row_values(t: dict, drive_link: str) -> list:
+def _share_sheet(drive, file_id: str) -> bool:
+    """Let anyone with the Sheet's link edit it, and say whether that had to be changed.
+    Drive, unlike Calendar, does allow write access on an anyone-with-the-link share.
+    Read first, so a Sheet that is already shared costs no write."""
+    listed = execute(drive.permissions().list(fileId=file_id, fields="permissions(id,type,role)"), "sheet sharing")
+    if _link_shared_as(listed.get("permissions"), "writer"):
+        return False
+    _link_share(drive, file_id, "writer", "sheet sharing")
+    return True
+
+
+def _marks_from_values(values: list, want_ticked: bool) -> set[str]:
+    """Reservation codes whose checkbox is (or isn't) ticked, read off a tab's own header
+    row rather than HEADER, so a Sheet written before the column existed is simply
+    ignored instead of misread."""
+    if not values or not values[0]:
+        return set()
+    header = values[0]
+    if "duplicate" not in header or "reservation_code" not in header:
+        return set()
+    box, code = header.index("duplicate"), header.index("reservation_code")
+    found = set()
+    for row in values[1:]:
+        if len(row) <= max(box, code) or not row[code]:
+            continue
+        if (str(row[box]).strip().upper() == "TRUE") == want_ticked:
+            found.add(row[code])
+    return found
+
+
+def read_sheet_marks(name: str, credentials_path: Path, token_path: Path) -> tuple[set[str], set[str]]:
+    """Showings handed back, or taken back, with the Sheet's checkbox: codes ticked on the
+    Tickets tab, and codes unticked on the Duplicates tab. Only those two directions count
+    — a ticked row on Duplicates and an unticked one on Tickets are just their normal
+    state, so reading them would undo whatever else this run decided."""
+    creds = get_credentials(credentials_path, token_path)
+    drive = build("drive", "v3", credentials=creds)
+    sheets = build("sheets", "v4", credentials=creds)
+
+    root_id = _find(drive, name, FOLDER_MIME, None)
+    sheet_id = _find(drive, name, SHEET_MIME, root_id) if root_id else None
+    if not sheet_id:
+        return set(), set()
+
+    grabbed = execute(
+        sheets.spreadsheets().values().batchGet(spreadsheetId=sheet_id, ranges=["Tickets", "Duplicates"]),
+        "sheet marks",
+    )
+    tabs = [r.get("values", []) for r in grabbed.get("valueRanges", [])]
+    tickets_tab, duplicates_tab = (tabs + [[], []])[:2]
+    return _marks_from_values(tickets_tab, True), _marks_from_values(duplicates_tab, False)
+
+
+def _row_values(t: dict, drive_link: str, is_duplicate: bool) -> list:
     return [
         t["start_time"].strftime("%Y-%m-%d %H:%M"),
         t["end_time"].strftime("%Y-%m-%d %H:%M") if t["end_time"] else "",
         t["length_min"] or "",
+        "TRUE" if is_duplicate else "FALSE",
         t["movie"],
         t["issued_to"],
         t["address"],
@@ -155,8 +237,8 @@ def _row_values(t: dict, drive_link: str) -> list:
     ]
 
 
-def _write_table(sheets, spreadsheet_id: str, sheet_id: int, title: str, rows: list) -> None:
-    values = [HEADER] + [_row_values(t, t["drive_link"]) for t in rows]
+def _write_table(sheets, spreadsheet_id: str, sheet_id: int, title: str, rows: list, marked: bool) -> None:
+    values = [HEADER] + [_row_values(t, t["drive_link"], marked) for t in rows]
     execute(
         sheets.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
@@ -180,6 +262,17 @@ def _write_table(sheets, spreadsheet_id: str, sheet_id: int, title: str, rows: l
         }}
         for i, t in enumerate(rows)
     ]
+    # Turns the column's TRUE/FALSE into tickable boxes. Skipped when there are no rows,
+    # since a zero-height range is rejected.
+    checkbox_request = [
+        {"setDataValidation": {
+            "range": {
+                "sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": num_rows,
+                "startColumnIndex": DUPLICATE_COL, "endColumnIndex": DUPLICATE_COL + 1,
+            },
+            "rule": {"condition": {"type": "BOOLEAN"}, "strict": True},
+        }}
+    ] if num_rows > 1 else []
     formatting = sheets.spreadsheets().batchUpdate(
         spreadsheetId=spreadsheet_id,
         body={
@@ -203,6 +296,7 @@ def _write_table(sheets, spreadsheet_id: str, sheet_id: int, title: str, rows: l
                     "dimensions": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": num_cols},
                 }},
                 *row_requests,
+                *checkbox_request,
             ]
         },
     )
@@ -233,7 +327,7 @@ def upload_to_drive(
     total = len(rows) + len(duplicate_rows)
     print(f"Uploading {total} PDFs (skipping any already there)...")
     recipients = _sync(drive, tickets_id, set(by_slug))
-    n = 0
+    n, newly_shared = 0, 0
     for slug, tickets in by_slug.items():
         folder_id = _child_folder(drive, recipients, slug, tickets_id)
         existing = _sync(drive, folder_id, {Path(t["file"]).name for t in tickets})
@@ -241,14 +335,24 @@ def upload_to_drive(
             n += 1
             found = existing.get(Path(t["file"]).name)
             print(f"  [{n}/{total}] {t['file']}{' (already there)' if found else ''}")
-            t["drive_link"] = found["webViewLink"] if found else _upload_file(drive, output_dir / t["file"], folder_id)
+            if found:
+                t["drive_link"] = found["webViewLink"]
+                newly_shared += _share_listed(drive, found)
+            else:
+                t["drive_link"] = _upload_file(drive, output_dir / t["file"], folder_id)
 
     existing = _sync(drive, duplicates_id, {Path(t["file"]).name for t in duplicate_rows})
     for t in duplicate_rows:
         n += 1
         found = existing.get(Path(t["file"]).name)
         print(f"  [{n}/{total}] {t['file']} (duplicate{', already there' if found else ''})")
-        t["drive_link"] = found["webViewLink"] if found else _upload_file(drive, output_dir / t["file"], duplicates_id)
+        if found:
+            t["drive_link"] = found["webViewLink"]
+            newly_shared += _share_listed(drive, found)
+        else:
+            t["drive_link"] = _upload_file(drive, output_dir / t["file"], duplicates_id)
+    if newly_shared:
+        print(f"  shared {newly_shared} already-uploaded PDFs by link")
 
     for csv_name in ("tickets.csv", "duplicates.csv"):
         csv_path = output_dir / csv_name
@@ -302,9 +406,12 @@ def upload_to_drive(
     )
 
     print(f"Writing Tickets table ({len(rows)} rows)...")
-    _write_table(sheets, spreadsheet_id, sheet_ids["Tickets"], "Tickets", rows)
+    _write_table(sheets, spreadsheet_id, sheet_ids["Tickets"], "Tickets", rows, marked=False)
     print(f"Writing Duplicates table ({len(duplicate_rows)} rows)...")
-    _write_table(sheets, spreadsheet_id, sheet_ids["Duplicates"], "Duplicates", duplicate_rows)
+    _write_table(sheets, spreadsheet_id, sheet_ids["Duplicates"], "Duplicates", duplicate_rows, marked=True)
+
+    if _share_sheet(drive, spreadsheet_id):
+        print("Shared the Sheet: anyone with the link can edit")
 
     return f"https://drive.google.com/drive/folders/{root_id}", f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
 
@@ -346,6 +453,42 @@ if __name__ == "__main__":
     assert list(keep) == ["a.pdf"], keep
     assert keep["a.pdf"]["webViewLink"] == "L1", keep
     assert drive.files().trashed == ["2", "3"], drive.files().trashed
+
+    # _marks_from_values reads each tab's own header, and only in the direction asked for.
+    tab = [
+        HEADER,
+        ["2026-08-11 16:30", "", "", "TRUE", "Motor City", "Ala", "", "", "AAA111", "", ""],
+        ["2026-08-11 21:30", "", "", "FALSE", "Zoolander", "Ala", "", "", "BBB222", "", ""],
+        ["2026-08-12 14:30", "", "", "", "Matrix", "Ala", "", "", "CCC333", "", ""],
+        ["2026-08-12 18:00"],  # a row Sheets trimmed to its last non-empty cell
+    ]
+    assert _marks_from_values(tab, True) == {"AAA111"}, _marks_from_values(tab, True)
+    assert _marks_from_values(tab, False) == {"BBB222", "CCC333"}, _marks_from_values(tab, False)
+    assert _marks_from_values([], True) == set()
+    # A Sheet written before the checkbox column existed is ignored, not misread.
+    old = [[c for c in HEADER if c != "duplicate"], ["x"] * (len(HEADER) - 1)]
+    assert _marks_from_values(old, True) == set()
+    assert _marks_from_values(old, False) == set()
+
+    # The checkbox sits immediately before the film, and reflects which tab it's on.
+    assert HEADER[DUPLICATE_COL + 1] == "movie", HEADER
+    ticket = {
+        "start_time": datetime(2026, 8, 11, 21, 30), "end_time": None, "length_min": None,
+        "movie": "Motor City", "issued_to": "Ala", "address": "Kino", "section": "S",
+        "reservation_code": "ABC123", "ticket_code": "T",
+    }
+    assert _row_values(ticket, "https://d/x", False)[DUPLICATE_COL] == "FALSE"
+    assert _row_values(ticket, "https://d/x", True)[DUPLICATE_COL] == "TRUE"
+    assert _row_values(ticket, "https://d/x", True)[CODE_COL] == "ABC123"
+
+    # Link sharing is per role: a PDF needs anyone/reader, the Sheet anyone/writer, and
+    # a share with a named person is not a link share at all.
+    assert _link_shared_as([{"type": "anyone", "role": "reader"}], "reader")
+    assert not _link_shared_as([{"type": "anyone", "role": "reader"}], "writer")
+    assert _link_shared_as([{"type": "anyone", "role": "writer"}], "writer")
+    assert not _link_shared_as([{"type": "user", "role": "reader"}], "reader")
+    assert not _link_shared_as([], "reader")
+    assert not _link_shared_as(None, "reader")  # listing came back without the field
 
     # execute() retries what's worth retrying and gives up immediately on the rest.
     class _Resp:

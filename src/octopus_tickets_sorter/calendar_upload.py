@@ -17,6 +17,7 @@ TIME_ZONE = "Europe/Warsaw"
 FALLBACK_LENGTH_MIN = 90  # used only if a movie's runtime is unknown
 SEPARATOR = " – "  # a person's calendar is titled "<name><SEPARATOR><person>"
 CREATE_PAUSE_S = 1.0  # breathing room between calendar creations, which are rationed hardest
+PUBLIC_ROLE = "reader"  # the most a link can carry: Google rejects "writer" on the public scope
 
 # What someone types in front of an event title to hand that showing back.
 DUPLICATE_MARK = re.compile(r"^\s*DUPLICATE\b[\s:–—-]*", re.IGNORECASE)
@@ -59,20 +60,22 @@ def _events(cal, calendar_id: str) -> list[dict]:
             return events
 
 
-def _is_public_writer(rule: dict) -> bool:
-    return rule.get("scope", {}).get("type") == "default" and rule.get("role") == "writer"
+def _is_public_reader(rule: dict) -> bool:
+    return rule.get("scope", {}).get("type") == "default" and rule.get("role") == PUBLIC_ROLE
 
 
 def _share(cal, calendar_id: str) -> bool:
-    """Let anyone holding the calendar's link edit it, and say whether that had to be
-    changed. Calendar has no "anyone with the link" tier the way Drive does — scope
-    "default" means public, so the calendar's id is the only thing gating access.
-    The rule is read first so a calendar already shared costs no write."""
+    """Make the calendar's link work for anyone it's sent to, and say whether that had
+    to be changed. Calendar has no "anyone with the link" tier the way Drive does —
+    scope "default" means public, and Google refuses to pair it with a role that can
+    write ("The default scope cannot be granted a write or owners access role"), so a
+    link can only ever carry read access. The rule is read first, so a calendar that is
+    already shared costs no write."""
     rules = execute(cal.acl().list(calendarId=calendar_id), "sharing rules").get("items", [])
-    if any(_is_public_writer(rule) for rule in rules):
+    if any(_is_public_reader(rule) for rule in rules):
         return False
     execute(
-        cal.acl().insert(calendarId=calendar_id, body={"role": "writer", "scope": {"type": "default"}}),
+        cal.acl().insert(calendarId=calendar_id, body={"role": PUBLIC_ROLE, "scope": {"type": "default"}}),
         "sharing rule",
     )
     return True
@@ -235,7 +238,7 @@ def create_calendars(rows: list, name: str, credentials_path: Path, token_path: 
             )
 
         if _share(cal, calendar_id):
-            print("  shared: anyone with the link can edit")
+            print("  shared: anyone with the link can view")
 
         added, updated, removed = _sync_events(cal, calendar_id, tickets)
         print(f"  {len(tickets)} showings: {added} added, {updated} updated, {removed} removed")
@@ -297,10 +300,11 @@ if __name__ == "__main__":
     assert _marked_code(untagged, "Anna", by_showing) == "ABC123"
     assert _marked_code(untagged, "Someone Else", by_showing) is None
 
-    # Only a public rule that grants editing counts as already shared; anything
-    # narrower would leave the link useless to the person it's sent to.
-    assert _is_public_writer({"role": "writer", "scope": {"type": "default"}})
-    assert not _is_public_writer({"role": "reader", "scope": {"type": "default"}})
-    assert not _is_public_writer({"role": "writer", "scope": {"type": "user", "value": "a@b.c"}})
-    assert not _is_public_writer({"role": "owner", "scope": {"type": "user", "value": "me@b.c"}})
+    # Only a public rule counts as the link being shared. "writer" on the public scope
+    # is not an option to check for — Google rejects it outright (400
+    # illegalAccessRoleForDefault), so editing can only ever be granted per person.
+    assert _is_public_reader({"role": "reader", "scope": {"type": "default"}})
+    assert not _is_public_reader({"role": "freeBusyReader", "scope": {"type": "default"}})
+    assert not _is_public_reader({"role": "reader", "scope": {"type": "user", "value": "a@b.c"}})
+    assert not _is_public_reader({"role": "owner", "scope": {"type": "user", "value": "me@b.c"}})
     print("ok")

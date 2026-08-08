@@ -237,9 +237,10 @@ def main():
                 file=sys.stderr,
             )
 
-    # Showings handed back by putting DUPLICATE in front of their calendar event. Read
-    # before the calendars are rebuilt, since that wipes the marks, and remembered here
-    # so the ticket stays a duplicate once its event is gone.
+    # Showings handed back by hand: a DUPLICATE prefix on a calendar event, or the Sheet's
+    # checkbox. Both are read before their surface is rewritten, and remembered here so the
+    # ticket stays a duplicate afterwards. Unticking on the Sheet is the way back, so it is
+    # applied last.
     name = load_name(args.config) if args.upload_drive else None
     stored_duplicates = load_duplicates(args.config)
     marked = set(stored_duplicates)
@@ -247,6 +248,11 @@ def main():
         from .calendar_upload import read_duplicate_marks
 
         marked |= read_duplicate_marks(name, tickets, aliases, args.credentials, args.token)
+    if args.upload_drive:
+        from .drive_upload import read_sheet_marks
+
+        ticked, unticked = read_sheet_marks(name, args.credentials, args.token)
+        marked = (marked | ticked) - unticked
     labels = {
         t["reservation_code"]: f"{t['issued_to']} – {t['movie']}, {t['start_time']:%Y-%m-%d %H:%M}"
         for t in tickets
