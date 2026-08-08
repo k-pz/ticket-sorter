@@ -129,10 +129,10 @@ def slugify(text: str) -> str:
 
 
 def parse_ticket(path: Path):
-    lines = [l.strip() for l in pypdf.PdfReader(path).pages[0].extract_text().split("\n")]
+    lines = [line.strip() for line in pypdf.PdfReader(path).pages[0].extract_text().split("\n")]
     while lines and lines[-1] == "":
         lines.pop()
-    i = next((n for n, l in enumerate(lines) if DATE_RE.match(l)), None)
+    i = next((n for n, line in enumerate(lines) if DATE_RE.match(line)), None)
     # Anything short of a title line at +11 and an organizer line after it isn't a ticket,
     # whatever matched the date: a stray receipt in input/ is skipped, not read past.
     if i is None or len(lines) <= i + 12:
@@ -243,7 +243,9 @@ def main():
     # checkbox. Both are read before their surface is rewritten, and remembered here so the
     # ticket stays a duplicate afterwards. Unticking on the Sheet is the way back, so it is
     # applied last.
-    name = load_name(args.config) if args.upload_drive else None
+    # Empty rather than None when nothing is uploaded: every reader of it is behind the
+    # same flag (--create-calendar implies --upload-drive), so the empty case never lands.
+    name = load_name(args.config) if args.upload_drive else ""
     stored_duplicates = load_duplicates(args.config)
     marked = set(stored_duplicates)
     if args.create_calendar:

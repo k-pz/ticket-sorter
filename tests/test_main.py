@@ -13,9 +13,8 @@ import tomllib
 from datetime import datetime
 from types import SimpleNamespace
 
-import pytest
-
 import conftest
+import pytest
 
 # the package's __init__ re-exports main(), shadowing the submodule of the same name
 m = importlib.import_module("octopus_tickets_sorter.main")

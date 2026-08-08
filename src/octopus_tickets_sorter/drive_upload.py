@@ -3,7 +3,6 @@ import json
 import random
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -217,7 +216,7 @@ def read_sheet_marks(name: str, credentials_path: Path, token_path: Path) -> tup
         "sheet marks",
     )
     tabs = [r.get("values", []) for r in grabbed.get("valueRanges", [])]
-    tickets_tab, duplicates_tab = (tabs + [[], []])[:2]
+    tickets_tab, duplicates_tab = [*tabs, [], []][:2]
     return _marks_from_values(tickets_tab, True), _marks_from_values(duplicates_tab, False)
 
 

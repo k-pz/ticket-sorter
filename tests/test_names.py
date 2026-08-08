@@ -8,6 +8,7 @@ import sys
 from collections import Counter
 
 import pytest
+
 from octopus_tickets_sorter.names import _tokens, collapse, look_alikes, merge_names, resolve
 
 

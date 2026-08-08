@@ -1,5 +1,6 @@
 """colors.py — one hue per distinct showing/person, neighbors kept far apart on the wheel."""
 import colorsys
+from itertools import pairwise
 
 import pytest
 
@@ -33,9 +34,9 @@ def test_person_hues_key_on_the_holder(make_ticket):
 
 @pytest.mark.parametrize("n", range(1, 16))
 def test_hues_stay_in_range_and_a_quarter_wheel_apart(n):
-    values = list(_hues(range(n)).values())  # the module's own sweep
+    values = list(_hues(list(range(n))).values())  # the module's own sweep
     assert all(0 <= h < 1 for h in values)
-    for a, b in zip(values, values[1:]):
+    for a, b in pairwise(values):
         dist = abs(a - b) % 1.0
         assert min(dist, 1.0 - dist) >= 0.25, (n, a, b)
 

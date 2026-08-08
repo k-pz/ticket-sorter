@@ -31,7 +31,7 @@ def look_alikes(names, strict: bool = False) -> list[list[str]]:
                 members += group_names
             else:
                 rest.append((group_tokens, group_names))
-        groups = rest + [(tokens, members)]
+        groups = [*rest, (tokens, members)]
     return [
         sorted(members)
         for _, members in groups

@@ -35,7 +35,7 @@ def person_hues(rows: list) -> dict[str, float]:
 
 
 def _pastel(hue: float) -> dict:
-    return dict(zip("red green blue".split(), colorsys.hls_to_rgb(hue, 0.85, 0.5)))
+    return dict(zip(["red", "green", "blue"], colorsys.hls_to_rgb(hue, 0.85, 0.5), strict=True))
 
 
 def showing_colors(rows: list) -> dict[tuple, dict]:

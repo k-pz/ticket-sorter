@@ -99,7 +99,7 @@ def token_file(tmp_path, expiry: str) -> Path:
 
 
 def test_get_credentials_without_a_client_secret_says_where_to_put_one(tmp_path):
-    with pytest.raises(FileNotFoundError, match="credentials.json"):
+    with pytest.raises(FileNotFoundError, match=r"credentials\.json"):
         du.get_credentials(tmp_path / "credentials.json", tmp_path / "token.json")
 
 
@@ -147,7 +147,8 @@ def test_marks_from_values_ignores_a_sheet_without_the_column():
     (None, True, ["2026-08-11 21:30", "", "", "TRUE"]),  # an unknown runtime blanks end_time and length
 ])
 def test_row_values(make_ticket, length_min, is_duplicate, head):
-    assert du._row_values(make_ticket(length_min=length_min), "https://d/x", is_duplicate) == head + [
+    assert du._row_values(make_ticket(length_min=length_min), "https://d/x", is_duplicate) == [
+        *head,
         "Motor City", "Anna Nowak", "Kino Żak, Gdańsk, ul. Wajdeloty 12",
         "Nocne Szaleństwo", "ABC123", "T-1234567", '=HYPERLINK("https://d/x", "Open ticket")',
     ]
@@ -306,11 +307,11 @@ def test_upload_to_drive(fake_google, make_pdf, make_ticket, tmp_path):
     assert duplicate["drive_link"] == "https://drive/D1"  # reused rather than uploaded again
 
     shares = [(u.split("/files/")[1].split("/permissions")[0], b["role"])
-              for u, b in zip(uris(http), bodies(http)) if b and b.get("type") == "anyone"]
+              for u, b in zip(uris(http), bodies(http), strict=True) if b and b.get("type") == "anyone"]
     assert shares == [("F1", "reader"), ("D1", "reader"), ("SS1", "writer")]
 
     tables = {u.split("/values/")[1].split("?")[0]: b["values"]
-              for u, b in zip(uris(http), bodies(http)) if b and "values" in b}
+              for u, b in zip(uris(http), bodies(http), strict=True) if b and "values" in b}
     assert list(tables) == ["Tickets%21A1", "Duplicates%21A1"]  # %21 is "!": both start top left
     tickets_tab, duplicates_tab = tables.values()
     assert tickets_tab[0] == du.HEADER
@@ -357,5 +358,5 @@ def test_upload_to_drive_reuses_the_sheet_and_replaces_what_changed(fake_google,
     # The recipient folder is trashed, and the CSVs are overwritten (their bodies are the
     # files themselves, so they read back as None) rather than uploaded beside the old ones.
     assert [(u.split("/files/")[1].split("?")[0], b)
-            for (u, method, *_), b in zip(http.request_sequence, bodies(http)) if method == "PATCH"
+            for (u, method, *_), b in zip(http.request_sequence, bodies(http), strict=True) if method == "PATCH"
             ] == [("OLD", {"trashed": True}), ("CSV1", None), ("CSV2", None)]

@@ -354,11 +354,15 @@ that already had a cached token (it was authorized without calendar access).
 
 Custom paths for either file: `--credentials PATH` / `--token PATH`.
 
-## Tests
+## Tests and QA
 
 ```sh
-uv run pytest
+uv run poe qa       # lint + types + tests
 ```
+
+The pieces run on their own too: `poe lint` (ruff), `poe types` (ty), `poe test`
+(pytest). `poe format` (`ruff format`) is deliberately left out of `qa` — the
+source is wrapped by hand and the formatter would rewrap it.
 
 Nothing in the suite talks to Google or reads the real `input/`, `output/` or
 `config.toml`. Ticket PDFs are generated with pypdf and parsed back through it,

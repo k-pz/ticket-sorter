@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 from conftest import bodies, uris
+
 from octopus_tickets_sorter import calendar_upload as cu
 
 CREDS = (Path("creds.json"), Path("token.json"))  # never opened: fake_google patches the auth away

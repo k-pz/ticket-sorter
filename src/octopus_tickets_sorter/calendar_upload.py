@@ -3,7 +3,7 @@ import colorsys
 import re
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -175,7 +175,7 @@ def read_duplicate_marks(
 def _hex(hue: float) -> str:
     """Calendar colors are per-calendar (not per-event), so any RGB works — no palette matching needed."""
     r, g, b = colorsys.hls_to_rgb(hue, 0.45, 0.6)
-    return "#{:02x}{:02x}{:02x}".format(round(r * 255), round(g * 255), round(b * 255))
+    return f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}"
 
 
 def _event_body(t: dict) -> dict:

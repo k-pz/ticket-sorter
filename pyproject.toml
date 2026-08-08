@@ -22,8 +22,30 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "poethepoet>=0.48.0",
     "pytest>=9.1.1",
+    "ruff>=0.16.2",
+    "ty>=0.0.69",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "W", "I", "B", "UP", "SIM", "C4", "RUF"]
+# Polish titles and the " – " calendar separator are the text, not typos.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.poe.tasks]
+test = "pytest"
+lint = "ruff check"
+types = "ty check"
+# Deliberately not part of qa: the source is hand-wrapped and the formatter would rewrap it.
+format = "ruff format"
+
+[tool.poe.tasks.qa]
+sequence = ["lint", "types", "test"]
+default_item_type = "ref"
