@@ -1,4 +1,4 @@
-# octopus-tickets-sorter
+# ticket-sorter
 
 Sorts biletomat.pl movie ticket PDFs from `input/` into `output/`: one copy per
 unique show goes to `output/tickets/<recipient>/`, repeat bookings for the same
@@ -11,44 +11,43 @@ https://octopusfilmfestival.com/program/), keyed by title.
 ## Usage
 
 ```sh
-uv run octopus-tickets-sorter
+uv run ticket-sorter
 ```
 
 ## Renaming input files
 
 Add `--rename-input` to also rename each PDF in `input/` in place to what it
 would be named as a ticket PDF (e.g. `bilety(3).pdf` becomes
-`matrix-GHI789__jan-nowak.pdf`), instead of leaving the
-downloaded filenames as-is. It's a rename, not a copy — the file stays in
-`input/`, and this is independent of `--upload-drive`/`--create-calendar`.
+`matrix-GHI789__jan-nowak.pdf`), instead of leaving the downloaded filenames
+as-is. It's a rename, not a copy — the file stays in `input/`, and this is
+independent of `--upload-drive`/`--create-calendar`.
 
 ```sh
-uv run octopus-tickets-sorter --rename-input
+uv run ticket-sorter --rename-input
 ```
 
 ## Collapsing one person's several names
 
 The same person's tickets don't always carry the same name: they get booked as
-`PAWEŁ ŻAK` and `PAWEŁ ZAK`, as `Joe` and `Joe
-"Rocket" Doe`, as `Anna Nowak` and `Ania Anna
-Nowak`. Left alone, each spelling becomes its own recipient folder, its own
-calendar, and its own set of rows.
+`PAWEŁ ŻAK` and `PAWEŁ ZAK`, as `Joe` and `Joe "Rocket" Doe`, as `Anna Nowak`
+and `Ania Anna Nowak`. Left alone, each spelling becomes its own recipient
+folder, its own calendar, and its own set of rows.
 
 Add `--merge-names` to be asked, before anything is sorted, which of the names
 are the same person. It lists every name with its ticket count, guesses which
 ones go together, and takes a group at a time until you're done:
 
 ```sh
-uv run octopus-tickets-sorter --merge-names
+uv run ticket-sorter --merge-names
 ```
 
 ```
 12 names across 107 tickets:
-    1  Jane                             2
-    2  Jane Doe                  1
+    1  Jane                          2
+    2  Jane Doe                      1
   ...
-   11  Janina Kowalska                13
-   12  Janina Kowalska-WIŚNIEWSKA       2
+   11  Janina Kowalska              13
+   12  Janina Kowalska-WIŚNIEWSKA    2
 
   maybe the same person:  1+2   4+5   7+8   6+9+10   11+12
 
@@ -87,9 +86,8 @@ finally recognized as a repeat booking and moved to `duplicates/`.
 
 Runs without `--merge-names` still apply the saved aliases, and print a note
 when two names look like one person — but only when one name's parts are
-contained in the other's (`Jane` vs `Jane Doe`), which a shared
-surname alone isn't. Anything subtler than that only shows up in the
-`--merge-names` list.
+contained in the other's (`Jane` vs `Jane Doe`), which a shared surname alone
+isn't. Anything subtler than that only shows up in the `--merge-names` list.
 
 ## Uploading to Google Drive + Sheets
 
@@ -124,7 +122,7 @@ recipients who dropped out — get moved to the trash. The two CSVs and the
 Sheet are always rewritten, since their contents change every run.
 
 ```sh
-uv run octopus-tickets-sorter --upload-drive
+uv run ticket-sorter --upload-drive
 ```
 
 ## Creating the Google Calendars
@@ -138,7 +136,7 @@ Google accounts or invite anyone as an attendee. Re-running wipes and
 rebuilds each calendar's events.
 
 ```sh
-uv run octopus-tickets-sorter --upload-drive --create-calendar
+uv run ticket-sorter --upload-drive --create-calendar
 ```
 
 Notes:

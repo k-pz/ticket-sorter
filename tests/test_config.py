@@ -3,7 +3,7 @@ import tomllib
 
 import pytest
 
-from octopus_tickets_sorter.config import (
+from ticket_sorter.config import (
     load_aliases,
     load_duplicates,
     load_name,
@@ -93,7 +93,7 @@ def test_save_tables_keeps_the_preamble_and_rewrites_both_tables(config_path):
     text = config_path.read_text(encoding="utf-8")
     assert text.startswith('name = "Octopus 2026 Tickets"\nupload_drive = true\n\n[aliases]\n')
     assert "Stara" not in text and "OLD123" not in text
-    assert text.index('"Paweł"') < text.index('"Ania"')  # sorted
+    assert text.index('"Ania"') < text.index('"Paweł"')  # sorted
     assert tomllib.loads(text) == {
         "name": "Octopus 2026 Tickets",
         "upload_drive": True,

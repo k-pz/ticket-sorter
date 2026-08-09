@@ -290,7 +290,7 @@ wheels = [
 ]
 
 [[package]]
-name = "octopus-tickets-sorter"
+name = "ticket-sorter"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

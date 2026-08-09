@@ -7,7 +7,7 @@ import pytest
 from conftest import bodies, uris
 from googleapiclient.errors import HttpError
 
-from octopus_tickets_sorter import drive_upload as du
+from ticket_sorter import drive_upload as du
 
 CREDS = (Path("creds.json"), Path("token.json"))  # never opened: fake_google patches the auth away
 

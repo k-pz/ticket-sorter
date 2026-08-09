@@ -17,7 +17,7 @@ import conftest
 import pytest
 
 # the package's __init__ re-exports main(), shadowing the submodule of the same name
-m = importlib.import_module("octopus_tickets_sorter.main")
+m = importlib.import_module("ticket_sorter.main")
 
 
 # --- slugify -----------------------------------------------------------------------
@@ -116,7 +116,7 @@ def argv(monkeypatch, tmp_path):
     config = tmp_path / "config.toml"
 
     def run(*flags):
-        monkeypatch.setattr(sys, "argv", ["octopus-tickets-sorter", "--config", str(config), *flags])
+        monkeypatch.setattr(sys, "argv", ["ticket-sorter", "--config", str(config), *flags])
         return m.parse_args()
 
     return SimpleNamespace(run=run, config=config)
@@ -156,7 +156,7 @@ def sorter(tmp_path, monkeypatch):
     monkeypatch.setattr(m, "DUPLICATES_DIR", paths.output / "duplicates")
 
     def run(*flags):
-        monkeypatch.setattr(sys, "argv", ["octopus-tickets-sorter", "--config", str(paths.config), *flags])
+        monkeypatch.setattr(sys, "argv", ["ticket-sorter", "--config", str(paths.config), *flags])
         m.main()
 
     paths.run = run
@@ -177,7 +177,7 @@ def test_main_files_each_ticket_under_its_recipient(sorter, make_pdf):
              movie="Matrix", start="12.08.2026 18:00")
     sorter.run()
 
-    assert names_in(sorter.output / "tickets") == ["pawel-zak", "anna-nowak"]
+    assert names_in(sorter.output / "tickets") == ["anna-nowak", "pawel-zak"]
     assert names_in(sorter.output / "tickets" / "anna-nowak") == [
         "motor-city-ABC123__anna-nowak.pdf"
     ]
@@ -203,7 +203,7 @@ def test_main_does_not_call_two_people_at_one_showing_duplicates(sorter, make_pd
     make_pdf("2.pdf", into=sorter.input, issued_to="Jan Nowak", reservation_code="B7XQZ1")
     sorter.run()
 
-    assert names_in(sorter.output / "tickets") == ["jan-nowak", "anna-nowak"]
+    assert names_in(sorter.output / "tickets") == ["anna-nowak", "jan-nowak"]
     assert names_in(sorter.output / "duplicates") == []
 
 
@@ -244,7 +244,7 @@ def test_main_rewrites_the_duplicate_marks_it_keeps(sorter, make_pdf):
 
 
 def test_main_untick_on_the_sheet_beats_a_stored_mark(sorter, make_pdf, monkeypatch):
-    from octopus_tickets_sorter import drive_upload
+    from ticket_sorter import drive_upload
 
     sorter.config.write_text('name = "Octopus"\n\n[duplicates]\n"ABC123" = "handed back"\n', encoding="utf-8")
     make_pdf("1.pdf", into=sorter.input)
@@ -266,7 +266,7 @@ def test_main_untick_on_the_sheet_beats_a_stored_mark(sorter, make_pdf, monkeypa
 def test_main_merge_names_files_both_spellings_under_one_recipient(sorter, make_pdf, monkeypatch):
     make_pdf("1.pdf", into=sorter.input)
     make_pdf("2.pdf", into=sorter.input, issued_to="Ania", reservation_code="B7XQZ1", movie="Matrix")
-    monkeypatch.setattr(sys, "stdin", io.StringIO("1 2\n1\n"))  # merge both, keep the first, then EOF
+    monkeypatch.setattr(sys, "stdin", io.StringIO("1 2\n2\n"))  # merge both, keep the full name, then EOF
     sorter.run("--merge-names")
 
     assert names_in(sorter.output / "tickets") == ["anna-nowak"]

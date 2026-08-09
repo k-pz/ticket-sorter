@@ -10,7 +10,7 @@ def resolve(name: str, aliases: dict[str, str]) -> str:
 
 
 def _tokens(name: str) -> set[str]:
-    """A name's parts, normalized so "PAWEŁ"/"PAWEŁ" and "Nowak"/"Nowak" match.
+    """A name's parts, normalized so "ZAK"/"ŻAK" and "Wisniewska"/"Wiśniewska" match.
     Initials and other one- or two-letter parts are dropped as too weak to match on."""
     from .main import slugify  # deferred: main.py imports this module at load time
 

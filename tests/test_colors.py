@@ -4,7 +4,7 @@ from itertools import pairwise
 
 import pytest
 
-from octopus_tickets_sorter.colors import _hues, person_hues, showing_colors, showing_hues, showing_key
+from ticket_sorter.colors import _hues, person_hues, showing_colors, showing_hues, showing_key
 
 
 def test_showing_key_ignores_who_holds_the_ticket(make_ticket):
