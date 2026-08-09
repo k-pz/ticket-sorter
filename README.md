@@ -1,26 +1,159 @@
 # ticket-sorter
 
-Sorts biletomat.pl movie ticket PDFs from `input/` into `output/`: one copy per
-unique show goes to `output/tickets/<recipient>/`, repeat bookings for the same
-show go to `output/duplicates/`. Also writes `tickets.csv` and `duplicates.csv`
-with the parsed metadata (showtime, end time, runtime, movie, section, codes,
-address, recipient). Runtimes come from a lookup table covering every film on
-the festival's program (sourced from each film's event page, linked off
-https://octopusfilmfestival.com/program/), keyed by title.
+You bought a pile of festival tickets on [biletomat.pl](https://biletomat.pl),
+for yourself and for other people, and now you have a folder of PDFs called
+`bilety(3).pdf`. This sorts them out.
 
-## Usage
+Point it at those PDFs and it reads each one (showtime, film, venue, whose name
+it was issued to, reservation code) and hands back:
+
+- one folder of tickets per person, files named after the film and the person;
+- the ones you bought twice for the same showing, pulled aside as duplicates;
+- `tickets.csv` and `duplicates.csv` with everything it parsed.
+
+Optionally, it can also put all of that in Google Drive with a linked
+spreadsheet, and give each person a Google Calendar of their showings with
+their ticket attached to every event. Those parts need a bit of Google setup
+and are described further down — the basic sorting needs none of it.
+
+Film runtimes (used for the end times and the calendar events) come from a
+lookup table in `src/ticket_sorter/main.py`, taken off each film's page on
+<https://octopusfilmfestival.com/program/> and keyed by title.
+
+---
+
+## 1. What you need
+
+**uv**, a Python package manager. That's the only thing to install — it takes
+care of Python itself (this needs 3.14, and uv will fetch it) and of the
+libraries.
 
 ```sh
+brew install uv                              # macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh   # macOS/Linux, without Homebrew
+```
+
+**Your ticket PDFs**, downloaded from biletomat.pl. Anything else that lands in
+the folder (a receipt, say) is skipped with a note rather than mangled.
+
+That's it for sorting. The Google features additionally need a Google account
+and a free OAuth client — see [Google setup](#4-google-setup-once).
+
+## 2. First run
+
+```sh
+git clone <this repo>
+cd ticket-sorter
+
+mkdir input                 # not in the repo: it holds real names and codes
+cp ~/Downloads/bilety*.pdf input/
+
 uv run ticket-sorter
 ```
 
+The first `uv run` takes a minute while uv downloads Python and the libraries;
+after that it starts instantly. You never activate a virtualenv or run `pip` —
+`uv run` does that for you.
+
+You should see something like:
+
+```
+wrote 104 tickets and 3 duplicates to /path/to/ticket-sorter/output
+```
+
+## 3. What you get
+
+`output/` is wiped and rebuilt on every run, so don't put anything of your own
+in it. `input/` is never touched (unless you ask for `--rename-input` below).
+
+```
+output/
+├── tickets/
+│   ├── jan-kowalski/
+│   │   ├── motor-city-ABC123__jan-kowalski.pdf
+│   │   └── zoolander-DEF456__jan-kowalski.pdf
+│   └── anna-nowak/
+│       └── vampyres-GHI789__anna-nowak.pdf
+├── duplicates/
+│   └── motor-city-JKL012.pdf
+├── tickets.csv
+└── duplicates.csv
+```
+
+A **duplicate** is a second ticket for a showing one person is already going
+to — same person, film, time and venue. The first ticket is the one that
+counts; the rest go to `duplicates/`. (You can also mark a ticket as one by
+hand; see [Handing a showing back](#handing-a-showing-back).)
+
+Both CSVs carry the same columns: `start_time`, `end_time`, `length_min`,
+`movie`, `issued_to`, `address`, `section`, `reservation_code`, `ticket_code`,
+`file`.
+
+## 4. Google setup (once)
+
+Only needed for `--upload-drive` and `--create-calendar`. Skip this section if
+you just want the sorted folders.
+
+The script acts as you against your own Drive and Calendar, which Google
+requires an OAuth client for. It's free and takes a couple of minutes:
+
+1. Go to [console.cloud.google.com](https://console.cloud.google.com/) and
+   create a new project (or pick an existing one).
+2. In **APIs & Services → Library**, enable the **Google Drive API**, the
+   **Google Sheets API**, and (if you'll use `--create-calendar`) the
+   **Google Calendar API**.
+3. In **APIs & Services → OAuth consent screen**, choose **External**, fill in
+   the required fields (app name, your email), and add yourself as a test user.
+   You don't need to submit it for verification for personal use.
+4. In **APIs & Services → Credentials**, click **Create Credentials → OAuth
+   client ID**, choose **Desktop app**, and create it.
+5. Download the resulting JSON and save it as `credentials.json` in the project
+   root (next to `pyproject.toml`). It's gitignored, so it stays local.
+
+The first run with `--upload-drive` opens a browser tab for you to authorize,
+then caches a `token.json` (also gitignored) so later runs don't ask again.
+Delete `token.json` to re-authorize — needed after revoking access, and the
+first time you add `--create-calendar` to a setup whose cached token was
+granted without calendar access.
+
+Custom paths for either file: `--credentials PATH` / `--token PATH`.
+
+## 5. The options
+
+| Flag | What it does |
+|---|---|
+| `--merge-names` | Ask which name spellings are the same person, before sorting |
+| `--rename-input` | Also rename the PDFs in `input/` in place |
+| `--upload-drive` | Upload to Google Drive and build a linked Sheet |
+| `--create-calendar` | One Google Calendar per person (needs `--upload-drive`) |
+| `--config PATH` | Use a different `config.toml` |
+| `--credentials PATH`, `--token PATH` | Use different Google credential files |
+
+A full run, once set up, is usually:
+
+```sh
+uv run ticket-sorter --merge-names --upload-drive --create-calendar
+```
+
+`--upload-drive` and `--create-calendar` can also be turned on permanently in
+`config.toml`, so you don't have to type them every time:
+
+```toml
+upload_drive = true
+create_calendar = true
+```
+
+A flag is on if either the CLI flag or the config value is true; passing the
+CLI flag can't turn off one the config enabled.
+
+---
+
 ## Renaming input files
 
-Add `--rename-input` to also rename each PDF in `input/` in place to what it
-would be named as a ticket PDF (e.g. `bilety(3).pdf` becomes
-`matrix-GHI789__jan-nowak.pdf`), instead of leaving the downloaded filenames
-as-is. It's a rename, not a copy — the file stays in `input/`, and this is
-independent of `--upload-drive`/`--create-calendar`.
+`--rename-input` renames each PDF in `input/` in place to the name it gets as a
+sorted ticket — `bilety(3).pdf` becomes `matrix-GHI789__jan-nowak.pdf`. It's a
+rename, not a copy: the file stays in `input/`, and this is independent of
+`--upload-drive`/`--create-calendar`.
 
 ```sh
 uv run ticket-sorter --rename-input
@@ -65,8 +198,8 @@ you can type a name of your own, which collapses the whole group into a
 spelling that appears on no ticket.
 
 Each answer is saved to `config.toml` in the project root (the same file that
-holds the name and flags below) and applied on every run from then on, so you
-only merge a name once:
+holds the name and flags) and applied on every run from then on, so you only
+merge a name once:
 
 ```toml
 [aliases]
@@ -91,15 +224,21 @@ isn't. Anything subtler than that only shows up in the `--merge-names` list.
 
 ## Uploading to Google Drive + Sheets
 
+Needs the [Google setup](#4-google-setup-once) above.
+
 Add `--upload-drive` to also upload everything to a Google Drive folder
-(mirroring the `tickets/`/`duplicates/` layout, plus the two CSVs) and build
-a Google Sheet with a `Tickets` tab and a `Duplicates` tab. Each row gets a
-"ticket_pdf" column that links straight to the uploaded PDF, and both tabs
-get a bold frozen header row with a filter applied so you can sort/filter
-them like a normal table.
+(mirroring the `tickets/`/`duplicates/` layout, plus the two CSVs) and build a
+Google Sheet with a `Tickets` tab and a `Duplicates` tab. Each row gets a
+"ticket_pdf" column that links straight to the uploaded PDF, and both tabs get
+a bold frozen header row with a filter applied so you can sort/filter them like
+a normal table.
+
+```sh
+uv run ticket-sorter --upload-drive
+```
 
 The Drive folder and Sheet are both named after the `name` in `config.toml`
-(see below).
+(see [Naming](#naming-the-drive-folder-sheet-and-calendar)).
 
 Two things are shared by link, so what you hand out actually opens:
 
@@ -115,25 +254,20 @@ tickets that weren't shared. Sharing is checked against what's already set (for
 the PDFs, off the folder listing that's read anyway), so a re-run doesn't
 re-share anything: it's ~one extra write per newly uploaded PDF and none after.
 
-Re-running syncs rather than re-uploads: a PDF already in Drive under the
-name this run would give it is left alone (its existing link is reused), and
-only files that this run wouldn't upload — tickets that changed name,
-recipients who dropped out — get moved to the trash. The two CSVs and the
-Sheet are always rewritten, since their contents change every run.
-
-```sh
-uv run ticket-sorter --upload-drive
-```
+Re-running syncs rather than re-uploads: a PDF already in Drive under the name
+this run would give it is left alone (its existing link is reused), and only
+files that this run wouldn't upload — tickets that changed name, recipients who
+dropped out — get moved to the trash. The two CSVs and the Sheet are always
+rewritten, since their contents change every run.
 
 ## Creating the Google Calendars
 
 Add `--create-calendar` (alongside `--upload-drive`, since events link to the
 uploaded tickets) to also build one calendar per ticket holder, named
 `<name> – <person>` after the Drive folder/Sheet name, holding only that
-person's showings: title is the movie, location is the venue address, and
-the description links to their ticket PDF. It doesn't try to match names to
-Google accounts or invite anyone as an attendee. Re-running wipes and
-rebuilds each calendar's events.
+person's showings: title is the movie, location is the venue address, and the
+description links to their ticket PDF. It doesn't try to match names to Google
+accounts or invite anyone as an attendee.
 
 ```sh
 uv run ticket-sorter --upload-drive --create-calendar
@@ -156,7 +290,7 @@ Notes:
 - Events are scheduled in the festival's local timezone (Europe/Warsaw), not
   whatever timezone your Google account or machine uses.
 - If a movie's runtime isn't in the `FILM_LENGTHS_MIN` lookup table in
-  `main.py`, its event falls back to a 90-minute length.
+  `src/ticket_sorter/main.py`, its event falls back to a 90-minute length.
 - Each printed `Calendar (<person>):` link opens that person's calendar and, as
   described below, is all anyone needs to add it to their own Google Calendar.
 
@@ -309,48 +443,8 @@ name = "Octopus 2026 Tickets"
 
 If `config.toml` doesn't exist yet, the first `--upload-drive` run asks for a
 name on the command line and creates the file for you, so future runs don't
-ask again. Edit the file (or delete it to be asked again) to change the
-name; custom path: `--config PATH`.
-
-### Setting flags via config.toml
-
-`--upload-drive` and `--create-calendar` can also be set as booleans in
-`config.toml`, so you don't have to pass them on every run:
-
-```toml
-upload_drive = true
-create_calendar = true
-```
-
-A flag is on if either the CLI flag or the config value is true; the CLI
-flag never turns one off that the config enabled.
-
-### One-time setup: Google Cloud OAuth client
-
-This needs an OAuth client so the script can act as you against your own
-Drive/Calendar. It's free and only takes a couple of minutes:
-
-1. Go to [console.cloud.google.com](https://console.cloud.google.com/) and
-   create a new project (or pick an existing one).
-2. In **APIs & Services → Library**, enable the **Google Drive API**, the
-   **Google Sheets API**, and (if you'll use `--create-calendar`) the
-   **Google Calendar API**.
-3. In **APIs & Services → OAuth consent screen**, choose **External**, fill
-   in the required fields (app name, your email), and add yourself as a test
-   user. You don't need to submit it for verification for personal use.
-4. In **APIs & Services → Credentials**, click **Create Credentials → OAuth
-   client ID**, choose **Desktop app**, and create it.
-5. Download the resulting JSON and save it as `credentials.json` in the
-   project root (next to `pyproject.toml`). It's gitignored, so it stays
-   local.
-
-The first `--upload-drive` run opens a browser tab for you to authorize; a
-`token.json` (also gitignored) is cached afterwards so future runs don't
-need to re-authorize. Delete `token.json` to re-authorize — needed after
-revoking access, or the first time you add `--create-calendar` to a session
-that already had a cached token (it was authorized without calendar access).
-
-Custom paths for either file: `--credentials PATH` / `--token PATH`.
+ask again. Edit the file (or delete it to be asked again) to change the name;
+custom path: `--config PATH`.
 
 ## Tests and QA
 
