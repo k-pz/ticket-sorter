@@ -11,6 +11,7 @@ from pathlib import Path
 from googleapiclient.discovery import build
 
 from .drive_upload import CONFIG_NAME, FOLDER_MIME, UNSORTED, execute, find_child, get_credentials
+from .main import free_path
 
 PDF_MIME = "application/pdf"
 
@@ -28,17 +29,6 @@ def _local_name(name: str) -> str:
     in a name there, and ".." is a name like any other rather than the way out of a folder."""
     cleaned = Path(name.replace("/", "-")).name
     return "ticket.pdf" if cleaned in ("", ".", "..") else cleaned
-
-
-def _free_path(directory: Path, name: str) -> Path:
-    """Where to put a download called `name`, given that everything downloaded before it is
-    already there. Two files in one Drive folder are allowed to share a name — and tickets
-    all arrive called something like `bilety.pdf` — but two files in a directory are not."""
-    path, stem, suffix, n = directory / name, Path(name).stem, Path(name).suffix, 1
-    while path.exists():
-        n += 1
-        path = directory / f"{stem}-{n}{suffix}"
-    return path
 
 
 def download_unsorted(name: str, dest_dir: Path, credentials_path: Path, token_path: Path) -> dict[Path, dict]:
@@ -88,7 +78,10 @@ def download_unsorted(name: str, dest_dir: Path, credentials_path: Path, token_p
     print(f"Downloading {len(pdfs)} PDFs from '{name}/{UNSORTED}'...")
     downloaded = {}
     for n, entry in enumerate(pdfs, 1):
-        path = _free_path(dest_dir, _local_name(entry["name"]))
+        # One Drive folder may hold any number of files under one name, and tickets all
+        # arrive called something like `bilety.pdf`; a directory may hold one of them, so
+        # the rest are downloaded beside it under names of their own rather than skipped.
+        path = free_path(dest_dir, _local_name(entry["name"]))
         print(f"  [{n}/{len(pdfs)}] {entry['name']}")
         path.write_bytes(_read(drive, entry["id"], "ticket download"))
         downloaded[path] = entry

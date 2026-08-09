@@ -130,6 +130,32 @@ def slugify(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "-", text).strip("-").lower()
 
 
+def free_path(directory: Path, name: str) -> Path:
+    """Where to put a file called `name` in `directory`, given everything already there.
+
+    A directory may not hold two files under one name, and two files that want the same one
+    are still two files — so the second gets `-2` before its suffix rather than landing on
+    top of the first, or being left out for being unable to.
+    """
+    path, stem, suffix, n = directory / name, Path(name).stem, Path(name).suffix, 1
+    while path.exists():
+        n += 1
+        path = directory / f"{stem}-{n}{suffix}"
+    return path
+
+
+def input_pdfs(directory: Path) -> list[Path]:
+    """Every PDF under `directory`, subfolders and all.
+
+    Tickets arrive from biletomat.pl all called the same thing — `bilety.pdf` — and a
+    directory can't hold two files under that one name. So a person with several of them
+    has several folders, one per download, and a scan that read only the top level would
+    sort whichever file happened to be moved out of its folder and silently drop the rest.
+    Each of those is a ticket of its own, whatever it shares a name with.
+    """
+    return sorted(path for path in directory.rglob("*.pdf") if path.is_file())
+
+
 def parse_ticket(path: Path):
     lines = [line.strip() for line in pypdf.PdfReader(path).pages[0].extract_text().split("\n")]
     while lines and lines[-1] == "":
@@ -288,10 +314,12 @@ def main():
         drive_files = download_unsorted(name, input_dir, args.credentials, args.token)
 
     tickets = []
-    for pdf in sorted(input_dir.glob("*.pdf")):
+    for pdf in input_pdfs(input_dir):
         ticket = parse_ticket(pdf)
         if ticket is None:
-            print(f"skip (unrecognized layout): {pdf.name}", file=sys.stderr)
+            # Named by where it sits under the input folder, not just by its file name:
+            # several of those are `bilety.pdf` and only the folder tells them apart.
+            print(f"skip (unrecognized layout): {pdf.relative_to(input_dir)}", file=sys.stderr)
             continue
         ticket["source"] = pdf
         tickets.append(ticket)
@@ -353,17 +381,18 @@ def main():
 
         base_name = f"{slugify(ticket['movie'])}-{ticket['reservation_code']}"
         if is_duplicate:
-            new_path = DUPLICATES_DIR / f"{base_name}.pdf"
-            DUPLICATES_DIR.mkdir(parents=True, exist_ok=True)
+            directory, file_name = DUPLICATES_DIR, f"{base_name}.pdf"
         else:
-            recipient_dir = TICKETS_DIR / slugify(ticket["issued_to"])
-            new_path = recipient_dir / f"{base_name}__{slugify(ticket['issued_to'])}.pdf"
-            recipient_dir.mkdir(parents=True, exist_ok=True)
+            slug = slugify(ticket["issued_to"])
+            directory, file_name = TICKETS_DIR / slug, f"{base_name}__{slug}.pdf"
+        directory.mkdir(parents=True, exist_ok=True)
 
-        if new_path.exists():
-            print(f"skip copy (target exists): {new_path.name}", file=sys.stderr)
-        else:
-            shutil.copy2(source, new_path)
+        # output/ was wiped at the start of the run, so anything already sitting under this
+        # name belongs to another ticket of this same run — one reservation code can cover
+        # several tickets. That's a different ticket PDF, so it gets a name of its own
+        # instead of being left out of the output for having an unlucky name.
+        new_path = free_path(directory, file_name)
+        shutil.copy2(source, new_path)
         ticket["file"] = str(new_path.relative_to(OUTPUT_DIR))
 
         renames[source] = new_path.name
