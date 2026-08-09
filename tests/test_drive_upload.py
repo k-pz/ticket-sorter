@@ -246,7 +246,8 @@ def test_authorizing_uses_the_client_from_the_environment(tmp_path, terminal, mo
     """The client alone, with no refresh token to go with it, is still the client: a local
     run authorizes against it without credentials.json ever being on disk."""
     monkeypatch.setenv(du.CLIENT_ENV, CLIENT_JSON)
-    authorized = SimpleNamespace(valid=True, to_json=lambda: '{"token": "new"}')
+    # granted in full, as a flow the user consented to all of reports back
+    authorized = SimpleNamespace(valid=True, granted_scopes=du.SCOPES, to_json=lambda: '{"token": "new"}')
     seen = {}
     monkeypatch.setattr(du.InstalledAppFlow, "from_client_config", lambda config, scopes: (
         seen.update(config=config, scopes=scopes),
@@ -274,6 +275,81 @@ def test_get_credentials_refreshes_an_expired_token_and_saves_it(tmp_path, monke
     assert du.get_credentials(tmp_path / "credentials.json", token).token == "fresh"
     assert json.loads(token.read_text())["token"] == "fresh"  # written back, so next run reuses it
     assert "Refreshing" in capsys.readouterr().out
+
+
+# --- the scopes those credentials carry --------------------------------------------
+
+
+def test_the_drive_scope_is_the_whole_of_drive():
+    """Not drive.file, which is the tempting one for an app that uploads: it shows an app
+    only what it created itself, and the input — an `unsorted` folder made by hand, with
+    ticket PDFs dropped into it — is by definition none of that."""
+    assert "https://www.googleapis.com/auth/drive" in du.SCOPES
+
+
+OLD_SCOPES = [  # what tokens made before the Drive scope widened carry
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/calendar",
+]
+
+
+def token_short_of_drive(expiry: str) -> str:
+    token = json.loads(token_json(expiry))
+    return json.dumps({**token, "scopes": OLD_SCOPES})
+
+
+def test_a_token_granted_less_than_the_run_needs_says_so(tmp_path, monkeypatch):
+    """Rather than going on to read Drive through it and finding nothing there — which is
+    what a listing made without the scope to see the files comes back with."""
+    monkeypatch.setenv(du.TOKEN_ENV, token_short_of_drive("2099-01-01T00:00:00Z"))
+    with pytest.raises(RuntimeError, match=r"doesn't carry https://www\.googleapis\.com/auth/drive\b"):
+        du.get_credentials(tmp_path / "credentials.json", tmp_path / "token.json")
+
+
+def test_a_token_file_granted_less_than_the_run_needs_says_so(tmp_path):
+    token = tmp_path / "token.json"
+    token.write_text(token_short_of_drive("2099-01-01T00:00:00Z"))
+    with pytest.raises(RuntimeError, match=du.REFRESH_ENV):  # and what to set instead
+        du.get_credentials(tmp_path / "credentials.json", token)
+
+
+def test_a_refresh_that_comes_back_short_of_a_scope_says_so(tmp_path, monkeypatch):
+    """The case a stored token can't be read for: a refresh token in the environment says
+    nothing about what it carries, and only redeeming it — which is what a run does first
+    — gets Google to say. It hands back what was consented to, not what was asked for."""
+    def transport(url, method="POST", body=b"", headers=None, **kwargs):
+        return SimpleNamespace(status=200, data=json.dumps({
+            "access_token": "ya29.minted", "expires_in": 3599, "token_type": "Bearer",
+            "scope": " ".join(OLD_SCOPES),
+        }).encode())
+
+    monkeypatch.setenv(du.CLIENT_ENV, CLIENT_JSON)
+    monkeypatch.setenv(du.REFRESH_ENV, "1//a-refresh-token")
+    monkeypatch.setattr(du, "Request", lambda: transport)
+    with pytest.raises(RuntimeError, match="Authorize again"):
+        du.get_credentials(tmp_path / "credentials.json", tmp_path / "token.json")
+
+
+def test_a_refresh_that_comes_back_with_every_scope_goes_through(tmp_path, monkeypatch):
+    def transport(url, method="POST", body=b"", headers=None, **kwargs):
+        return SimpleNamespace(status=200, data=json.dumps({
+            "access_token": "ya29.minted", "expires_in": 3599, "token_type": "Bearer",
+            "scope": " ".join(du.SCOPES),
+        }).encode())
+
+    monkeypatch.setenv(du.CLIENT_ENV, CLIENT_JSON)
+    monkeypatch.setenv(du.REFRESH_ENV, "1//a-refresh-token")
+    monkeypatch.setattr(du, "Request", lambda: transport)
+    assert du.get_credentials(tmp_path / "credentials.json", tmp_path / "token.json").token == "ya29.minted"
+
+
+def test_a_token_that_says_nothing_about_its_scopes_is_left_alone(tmp_path, monkeypatch):
+    """Nothing said is not the same as nothing granted: a token file written by hand needn't
+    list them, and a refresh needn't repeat them. Google is the one to answer for that."""
+    token = json.loads(token_json("2099-01-01T00:00:00Z"))
+    monkeypatch.setenv(du.TOKEN_ENV, json.dumps({k: v for k, v in token.items() if k != "scopes"}))
+    assert du.get_credentials(tmp_path / "credentials.json", tmp_path / "token.json").token == "cached"
 
 
 # --- the Sheet's tables ------------------------------------------------------------
