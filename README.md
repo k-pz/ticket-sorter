@@ -549,7 +549,14 @@ and variables → Actions**:
 | `TICKET_SORTER_CLIENT_ID` | Secrets | The OAuth client from the Cloud project, as its two halves |
 | `TICKET_SORTER_CLIENT_SECRET` | Secrets | |
 | `TICKET_SORTER_REFRESH_TOKEN` | Secrets | A refresh token issued to that client |
-| `TICKET_SORTER_NAME` | Variables | The name of the Drive folder, Sheet and calendars |
+| `TICKET_SORTER_NAME` | Either | The name of the Drive folder, Sheet and calendars |
+
+The first three are secrets because they're credentials. The name isn't one, so
+it belongs under **Variables** — but it's read from a secret of the same name
+when there's no variable set, so adding it alongside the other three works too,
+and you don't have to notice which tab you're on. The only difference is that a
+secret comes back masked: the log says it's sorting into `***` rather than
+naming the folder.
 
 **`credentials.json` on its own is not enough, and no setting can make it be.**
 It says which app is asking; it doesn't say that you agreed. Only you can do
@@ -607,8 +614,8 @@ it's a normal web page, so a phone is fine.
    Tap **Authorize APIs**, sign in, and accept. In **Step 2**, tap **Exchange
    authorization code for tokens**, and copy the **refresh token** into the
    `TICKET_SORTER_REFRESH_TOKEN` secret.
-5. Add the `TICKET_SORTER_NAME` variable, and run the workflow from the
-   **Actions** tab.
+5. Add `TICKET_SORTER_NAME` — a variable ideally, another secret if that's the
+   box already in front of you — and run the workflow from the **Actions** tab.
 
 All three scopes have to be authorized together in step 4: the token you get
 carries exactly what you asked for, and one missing scope fails the run with
