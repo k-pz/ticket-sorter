@@ -541,35 +541,82 @@ to have it sort by itself every hour).
 
 Nothing is passed to it on the command line but the flags: the name it goes by
 and the credentials it acts under come from its environment, so the workflow
-file has no settings of yours in it. Three of them, under **Settings → Secrets
+file has no settings of yours in it. Four of them, under **Settings → Secrets
 and variables → Actions**:
 
 | | Where | What |
 |---|---|---|
-| `TICKET_SORTER_OAUTH_CLIENT` | Secrets | Your `credentials.json` — the OAuth client from the Cloud project |
+| `TICKET_SORTER_CLIENT_ID` | Secrets | The OAuth client from the Cloud project, as its two halves |
+| `TICKET_SORTER_CLIENT_SECRET` | Secrets | |
 | `TICKET_SORTER_REFRESH_TOKEN` | Secrets | A refresh token issued to that client |
 | `TICKET_SORTER_NAME` | Variables | The name of the Drive folder, Sheet and calendars |
 
-That's the same pair a `token.json` is made of, held as two secrets instead of
-one blob. To get the refresh token, authorize once locally with everything the
-Action will use — so it carries the Drive *and* Calendar access it'll need —
-and read it off what that leaves behind:
+**`credentials.json` on its own is not enough, and no setting can make it be.**
+It says which app is asking; it doesn't say that you agreed. Only you can do
+that, once, in a browser — and what that hands back is the refresh token in the
+third row. Everything after that first consent is automatic, which is the whole
+point of it.
+
+The easiest way to get one, if you already have the tool running locally, is to
+authorize with everything the Action will use — so the token carries the Drive
+*and* Calendar access it'll need — and read it off what that leaves behind:
 
 ```sh
 uv run ticket-sorter --upload-drive --create-calendar
 python3 -c "import json; print(json.load(open('token.json'))['refresh_token'])"
 ```
 
-If you'd rather keep one secret than two, `TICKET_SORTER_TOKEN` holding the
-whole `cat token.json` works in its place and is read ahead of it. Either way,
-credentials from the environment are read ahead of `token.json` and never
+Or keep one secret instead of three: `TICKET_SORTER_TOKEN`, holding the whole
+`cat token.json`, stands in for all of the above and is read first. The whole
+`credentials.json` in `TICKET_SORTER_OAUTH_CLIENT` stands in for the id and
+secret, and also for the file itself when authorizing from scratch, so a local
+run needn't keep it on disk either.
+
+Credentials from the environment are read ahead of `token.json` and never
 written back to: the refresh they need lasts the run, and a run given its
 credentials as secrets has nowhere of its own to keep one. A run with no usable
 credentials and no terminal to open a browser on says so, rather than hanging
 on a browser that's never coming back.
 
-`$TICKET_SORTER_OAUTH_CLIENT` also stands in for `credentials.json` when
-authorizing from scratch, so a local run needn't keep that file on disk either.
+### Setting it up from a phone
+
+You never need a terminal for any of this. What you need is one consent in a
+browser, and Google's own [OAuth
+Playground](https://developers.google.com/oauthplayground/) will do it —
+it's a normal web page, so a phone is fine.
+
+1. **Cloud console → Credentials → Create credentials → OAuth client ID**,
+   type **Web application** (not Desktop: the Playground has to be able to
+   redirect back to itself). Under **Authorized redirect URIs** add
+   `https://developers.google.com/oauthplayground`. Save.
+2. The client id and secret are shown with copy buttons next to them. Paste
+   them straight into the `TICKET_SORTER_CLIENT_ID` and
+   `TICKET_SORTER_CLIENT_SECRET` secrets — that's why those exist as separate
+   settings, since downloading a JSON file and getting its contents into a
+   secret box is the one thing a phone is bad at.
+3. Open the **OAuth Playground**, tap the **gear**, tick **Use your own OAuth
+   credentials**, and paste the same id and secret. Leave the flow at
+   *Server-side* and access type at *Offline* — offline is what makes the
+   refresh token appear at all.
+4. In **Step 1**, type these three scopes into the "input your own scopes" box:
+
+   ```
+   https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar
+   ```
+
+   Tap **Authorize APIs**, sign in, and accept. In **Step 2**, tap **Exchange
+   authorization code for tokens**, and copy the **refresh token** into the
+   `TICKET_SORTER_REFRESH_TOKEN` secret.
+5. Add the `TICKET_SORTER_NAME` variable, and run the workflow from the
+   **Actions** tab.
+
+All three scopes have to be authorized together in step 4: the token you get
+carries exactly what you asked for, and one missing scope fails the run with
+"Not all requested scopes were granted" rather than half-working.
+
+Using your own client id here rather than the Playground's is also what stops
+the Playground revoking the refresh token after 24 hours, so don't skip step 3's
+gear.
 
 ### The whole environment
 
@@ -577,23 +624,26 @@ authorizing from scratch, so a local run needn't keep that file on disk either.
 |---|---|
 | `TICKET_SORTER_CONFIG` | Where `config.toml` is, as `--config` |
 | `TICKET_SORTER_NAME` | The Drive folder/Sheet/Calendar name, as `--name` |
-| `TICKET_SORTER_OAUTH_CLIENT` | The contents of `credentials.json` |
+| `TICKET_SORTER_CLIENT_ID` | The OAuth client's id, off the Cloud console |
+| `TICKET_SORTER_CLIENT_SECRET` | …and its secret. Both or neither |
+| `TICKET_SORTER_OAUTH_CLIENT` | Or the whole `credentials.json`, in place of those two |
 | `TICKET_SORTER_REFRESH_TOKEN` | A refresh token issued to that client |
-| `TICKET_SORTER_TOKEN` | The contents of a whole `token.json` |
+| `TICKET_SORTER_TOKEN` | Or a whole `token.json`, in place of all four |
 
-The first two are the values their flags take; the rest are the contents of
-files, so a secret never has to be written to disk. The flags themselves stay
-flags — the workflow spells them out, and they say what a run is *for* rather
-than what it's set up with.
+The first two are the values their flags take; the rest are credentials, none
+of which ever has to be written to disk. The flags themselves stay flags — the
+workflow spells them out, and they say what a run is *for* rather than what
+it's set up with.
 
 ### Things worth knowing before you set this up
 
 - **While your OAuth consent screen is in "Testing", Google expires refresh
   tokens after 7 days.** The Action then fails with an `invalid_grant` error,
-  and the fix is to authorize locally again and update the secret. This is a
-  property of the token, not of how you store it, so using the OAuth client and
-  a refresh token rather than a whole `token.json` doesn't change it. What does
-  is **Publish app** on the OAuth consent screen: for sensitive scopes an
+  and the fix is to authorize again and update the secret. This is a property
+  of the token, not of how you store it or where you made it — the Playground
+  route above included. What does change it is **Publish app** on the OAuth
+  consent screen (worth doing before step 3, and worth doing from a phone in
+  about four taps): for sensitive scopes an
   unverified app still works for its own owner (with a warning screen at
   authorization time, and a cap on how many users it can have), and its refresh
   tokens stop expiring on a weekly clock.

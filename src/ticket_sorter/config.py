@@ -19,6 +19,8 @@ CONFIG_ENV = "TICKET_SORTER_CONFIG"          # where config.toml is, as --config
 NAME_ENV = "TICKET_SORTER_NAME"              # the Drive folder/Sheet/Calendar name, as --name
 TOKEN_ENV = "TICKET_SORTER_TOKEN"            # a whole token.json
 CLIENT_ENV = "TICKET_SORTER_OAUTH_CLIENT"    # the Cloud project's OAuth client, i.e. credentials.json
+CLIENT_ID_ENV = "TICKET_SORTER_CLIENT_ID"        # or that client as its two halves, which is
+CLIENT_SECRET_ENV = "TICKET_SORTER_CLIENT_SECRET"  # what the Cloud console has copy buttons for
 REFRESH_ENV = "TICKET_SORTER_REFRESH_TOKEN"  # a refresh token issued to that client
 
 

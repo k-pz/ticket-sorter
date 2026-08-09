@@ -194,6 +194,36 @@ def test_a_refresh_token_redeems_for_a_usable_one():
         assert quote_plus(scope) in posted["body"]
 
 
+def test_get_credentials_from_a_client_id_and_secret(tmp_path, monkeypatch):
+    """The same client, as the two values the Cloud console has copy buttons for — which is
+    all anyone setting this up from a phone can reasonably get into a secret."""
+    monkeypatch.setenv(du.CLIENT_ID_ENV, "c.apps.googleusercontent.com")
+    monkeypatch.setenv(du.CLIENT_SECRET_ENV, "s")
+    monkeypatch.setenv(du.REFRESH_ENV, "1//a-refresh-token")
+    monkeypatch.setattr(du.Credentials, "refresh", lambda self, _request: setattr(self, "token", "fresh"))
+
+    creds = du.get_credentials(tmp_path / "credentials.json", tmp_path / "token.json")
+    assert (creds.client_id, creds.client_secret) == ("c.apps.googleusercontent.com", "s")
+    assert (creds.token, creds.refresh_token) == ("fresh", "1//a-refresh-token")
+
+
+@pytest.mark.parametrize("half", ["TICKET_SORTER_CLIENT_ID", "TICKET_SORTER_CLIENT_SECRET"])
+def test_get_credentials_will_not_take_half_a_client(tmp_path, monkeypatch, half):
+    monkeypatch.setenv(half, "one-half")
+    monkeypatch.setenv(du.REFRESH_ENV, "1//a-refresh-token")
+    with pytest.raises(RuntimeError, match="only work as a pair"):
+        du.get_credentials(tmp_path / "credentials.json", tmp_path / "token.json")
+
+
+def test_a_client_id_and_secret_are_enough_to_authorize_with(tmp_path, terminal, monkeypatch):
+    """from_client_config insists on auth_uri and token_uri, which a pasted id and secret
+    don't come with — so the pair is filled out to Google's own endpoints, not left short."""
+    monkeypatch.setenv(du.CLIENT_ID_ENV, "c.apps.googleusercontent.com")
+    monkeypatch.setenv(du.CLIENT_SECRET_ENV, "s")
+    flow = du.InstalledAppFlow.from_client_config(du._oauth_client(), du.SCOPES)  # the real one
+    assert flow.client_config["client_id"] == "c.apps.googleusercontent.com"
+
+
 def test_get_credentials_prefers_a_whole_token_to_the_client_pair(tmp_path, monkeypatch):
     monkeypatch.setenv(du.TOKEN_ENV, token_json("2099-01-01T00:00:00Z", token="from-the-token"))
     monkeypatch.setenv(du.CLIENT_ENV, CLIENT_JSON)

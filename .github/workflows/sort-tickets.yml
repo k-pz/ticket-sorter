@@ -5,12 +5,14 @@ name: Sort tickets
 # the duplicate marks — is kept beside them, since the runner is thrown away afterwards.
 #
 # Settings, all under Settings -> Secrets and variables -> Actions:
-#   TICKET_SORTER_OAUTH_CLIENT  (secret)   credentials.json, from the Cloud project
+#   TICKET_SORTER_CLIENT_ID     (secret)   the Cloud project's OAuth client, as its two halves
+#   TICKET_SORTER_CLIENT_SECRET (secret)
 #   TICKET_SORTER_REFRESH_TOKEN (secret)   a refresh token issued to that client
 #   TICKET_SORTER_NAME          (variable) the name of the Drive folder, Sheet and calendars
 #
-# A whole token.json in a TICKET_SORTER_TOKEN secret works instead of the two above, if you'd
-# rather keep one secret than two. See "Running it from GitHub Actions" in README.md.
+# The whole credentials.json in TICKET_SORTER_OAUTH_CLIENT works in place of the id and secret,
+# and a whole token.json in TICKET_SORTER_TOKEN in place of all three. See "Running it from
+# GitHub Actions" in README.md, which walks through getting a refresh token from a phone.
 
 on:
   workflow_dispatch:
@@ -32,8 +34,10 @@ jobs:
     timeout-minutes: 30
     env:
       TICKET_SORTER_NAME: ${{ vars.TICKET_SORTER_NAME }}
-      TICKET_SORTER_OAUTH_CLIENT: ${{ secrets.TICKET_SORTER_OAUTH_CLIENT }}
+      TICKET_SORTER_CLIENT_ID: ${{ secrets.TICKET_SORTER_CLIENT_ID }}
+      TICKET_SORTER_CLIENT_SECRET: ${{ secrets.TICKET_SORTER_CLIENT_SECRET }}
       TICKET_SORTER_REFRESH_TOKEN: ${{ secrets.TICKET_SORTER_REFRESH_TOKEN }}
+      TICKET_SORTER_OAUTH_CLIENT: ${{ secrets.TICKET_SORTER_OAUTH_CLIENT }}
       TICKET_SORTER_TOKEN: ${{ secrets.TICKET_SORTER_TOKEN }}
     steps:
       - uses: actions/checkout@v5
@@ -42,14 +46,15 @@ jobs:
         with:
           enable-cache: true
 
-      # Said here rather than left to fail deeper in, where an empty name reads as no name.
+      # As annotations on the run, which is what you get to read on a phone. What's missing
+      # from the credentials themselves the run says for itself, in as much detail.
       - name: Check the settings are there
         run: |
+          missing() { echo "::error::$1"; exit 1; }
           [ -n "$TICKET_SORTER_NAME" ] ||
-            { echo "::error::Set the TICKET_SORTER_NAME repository variable to the name of the Drive folder."; exit 1; }
-          [ -n "$TICKET_SORTER_TOKEN" ] ||
-            { [ -n "$TICKET_SORTER_OAUTH_CLIENT" ] && [ -n "$TICKET_SORTER_REFRESH_TOKEN" ]; } ||
-            { echo "::error::Set the TICKET_SORTER_OAUTH_CLIENT and TICKET_SORTER_REFRESH_TOKEN secrets (or TICKET_SORTER_TOKEN)."; exit 1; }
+            missing "Set the TICKET_SORTER_NAME variable to the name of the Drive folder."
+          [ -n "$TICKET_SORTER_REFRESH_TOKEN$TICKET_SORTER_TOKEN" ] ||
+            missing "Set TICKET_SORTER_REFRESH_TOKEN, with the client it belongs to. See README.md."
 
       # The name and the config it uses come from the environment above; what's left is what
       # this run is for.

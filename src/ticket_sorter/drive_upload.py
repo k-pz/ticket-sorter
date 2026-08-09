@@ -14,7 +14,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from .colors import showing_colors, showing_key
-from .config import CLIENT_ENV, REFRESH_ENV, TOKEN_ENV
+from .config import CLIENT_ENV, CLIENT_ID_ENV, CLIENT_SECRET_ENV, REFRESH_ENV, TOKEN_ENV
 from .main import slugify
 
 MAX_ATTEMPTS = 7  # ~1+2+4+8+16+32s of waiting before giving up
@@ -28,7 +28,10 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar",
 ]
 
-TOKEN_URI = "https://oauth2.googleapis.com/token"  # where a refresh is redeemed, if the client omits it
+# Google's own endpoints, for a client given as an id and a secret rather than as the JSON
+# those normally arrive wrapped in. Also the fallback for a JSON that leaves them out.
+AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
+TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 UNSORTED = "unsorted"    # the folder in the Drive folder that --input-drive reads from
 CONFIG_NAME = "config.toml"  # and the config a --config-drive run keeps beside it
@@ -103,15 +106,28 @@ def _env_json(name: str, what: str) -> dict | None:
 
 
 def _oauth_client() -> dict | None:
-    """The Cloud project's OAuth client, if it was passed in the environment rather than left
-    in a file — the whole JSON the Credentials page hands you, "installed" wrapper and all."""
+    """The Cloud project's OAuth client, if the environment carries one, in either of the two
+    shapes it comes in: the whole JSON the Credentials page hands you, "installed" wrapper and
+    all, or the client id and secret on their own. The second is for setting this up from a
+    phone, where those two have copy buttons next to them and the JSON is a file download."""
     client = _env_json(CLIENT_ENV, "an OAuth client's JSON")
-    if client and not (client.get("installed") or client.get("web")):
-        raise RuntimeError(
-            f"${CLIENT_ENV} is set, but holds JSON with no 'installed' or 'web' section: pass the "
-            "whole file downloaded from the Cloud project's Credentials page, not a part of it."
-        )
-    return client
+    if client:
+        if not (client.get("installed") or client.get("web")):
+            raise RuntimeError(
+                f"${CLIENT_ENV} is set, but holds JSON with no 'installed' or 'web' section: pass the "
+                "whole file downloaded from the Cloud project's Credentials page, not a part of it."
+            )
+        return client
+
+    client_id, client_secret = os.environ.get(CLIENT_ID_ENV), os.environ.get(CLIENT_SECRET_ENV)
+    if client_id and client_secret:
+        return {"installed": {
+            "client_id": client_id, "client_secret": client_secret,
+            "auth_uri": AUTH_URI, "token_uri": TOKEN_URI,
+        }}
+    if client_id or client_secret:
+        raise RuntimeError(f"${CLIENT_ID_ENV} and ${CLIENT_SECRET_ENV} only work as a pair; one of them is unset.")
+    return None
 
 
 def _from_refresh_token(client: dict, refresh_token: str) -> Credentials:
@@ -158,9 +174,9 @@ def _authorize(credentials_path: Path) -> Credentials:
     if not sys.stdin.isatty():
         raise RuntimeError(
             "No usable Google token, and no way to ask for one: authorizing opens a browser and "
-            "this run has no terminal. Authorize once on a machine that has one, then pass what "
-            f"that leaves behind — either the whole token file as ${TOKEN_ENV}, or the OAuth "
-            f"client as ${CLIENT_ENV} and its refresh_token as ${REFRESH_ENV} (see README.md)."
+            f"this run has no terminal. Set ${REFRESH_ENV} to a refresh token, along with the "
+            f"OAuth client it was issued to — as ${CLIENT_ID_ENV} and ${CLIENT_SECRET_ENV}, or "
+            f"as ${CLIENT_ENV}. A whole token file in ${TOKEN_ENV} does instead (see README.md)."
         )
     if not client and not credentials_path.exists():
         raise FileNotFoundError(
