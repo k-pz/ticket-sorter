@@ -1,0 +1,59 @@
+name: QA
+
+# The same three checks as a local `uv run poe qa` — ruff, ty, pytest — on every pull request
+# and on every push to main, so nothing merges without having been through them. What the
+# checks *are* stays in pyproject.toml; this file only says when they run and where their
+# output goes. Nothing here needs a secret: the suite talks to no Google API and reads none of
+# the real input.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+# A new push to a branch supersedes whatever was still running for the one before it. Unlike a
+# sort run, a half-finished QA run leaves nothing behind, so cancelling it costs nothing.
+concurrency:
+  group: qa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Both tools read this from the environment, which is what lets the steps below run the
+      # plain poe tasks and still get their findings back as annotations on the changed lines —
+      # what you get to read on a phone, without opening the log.
+      RUFF_OUTPUT_FORMAT: github
+      TY_OUTPUT_FORMAT: github
+      # Applies to every uv call here: fail the run if uv.lock no longer matches pyproject.toml,
+      # rather than quietly resolving something else and testing that instead.
+      UV_LOCKED: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # Python itself included — the version comes from .python-version, as it does locally.
+      - name: Install
+        run: uv sync
+
+      - name: Lint
+        run: uv run poe lint
+
+      # The remaining checks run even once one has failed, so a single run tells you everything
+      # that is wrong instead of the first thing. `poe qa` stops at the first failure locally,
+      # where you can just run the next one yourself.
+      - name: Types
+        if: ${{ !cancelled() }}
+        run: uv run poe types
+
+      - name: Test
+        if: ${{ !cancelled() }}
+        run: uv run poe test

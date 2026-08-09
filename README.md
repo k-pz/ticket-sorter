@@ -1,5 +1,7 @@
 # ticket-sorter
 
+[![QA](https://github.com/k-pz/ticket-sorter/actions/workflows/qa.yml/badge.svg)](https://github.com/k-pz/ticket-sorter/actions/workflows/qa.yml)
+
 > Written with AI assistance (Claude Code), reviewed by a human. It runs
 > against my own ticket PDFs and Google account, and the test suite passes —
 > but read it before you point it at yours.
@@ -768,3 +770,17 @@ Nothing in the suite talks to Google or reads the real `input/`, `unsorted/`,
 and the Google clients are real `googleapiclient` services running on
 `HttpMockSequence`, so requests are still built and checked against each API's
 discovery document.
+
+### On GitHub
+
+The `QA` workflow runs those same three checks on every pull request and on
+every push to `main`, on the Python from `.python-version` and the exact
+versions in `uv.lock` — a lockfile that has drifted from `pyproject.toml` fails
+the run rather than being resolved around. Because the suite needs no
+credentials, the job is given no secrets and no token permissions.
+
+Ruff's and ty's findings come back as annotations on the offending lines, so a
+red run can be read from the summary — or from a phone — without opening the
+log. All three checks run even after one has failed, which is where this
+differs from a local `poe qa`: one run lists everything that is wrong instead
+of stopping at the first thing.
