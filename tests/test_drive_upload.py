@@ -373,6 +373,17 @@ def test_sync_keeps_one_per_wanted_name_and_trashes_the_rest(fake_google):
     assert keep["a.pdf"]["webViewLink"] == "L1"
     assert [u.split("/files/")[1].split("?")[0] for u in uris(http)[1:]] == ["2", "3"]
     assert bodies(http)[1:] == [{"trashed": True}] * 2
+    # The survivor is the first listed, so the listing has to be the one that puts the file
+    # written last there — otherwise the copy a run keeps is whichever Drive felt like.
+    assert f"orderBy={quote_plus(du.NEWEST_FIRST)}" in uris(http)[0]
+
+
+def test_find_child_takes_the_newest_of_several_with_one_name(fake_google):
+    """Drive lets a folder hold two files called config.toml. Which one a run reads decides
+    whether it carries on from the last run's aliases or from a copy of them from before."""
+    drive, http = service(fake_google, [{"files": [{"id": "NEW"}, {"id": "OLD"}]}])
+    assert du.find_child(drive, "config.toml", None, "ROOT") == "NEW"
+    assert f"orderBy={quote_plus(du.NEWEST_FIRST)}" in uris(http)[0]
 
 
 def test_sync_keeps_what_no_run_uploads(fake_google):

@@ -51,6 +51,11 @@ CODE_COL = HEADER.index("reservation_code")
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 
+# Drive lets a folder hold several files under one name, and orders a listing however it
+# likes unless told. Both the lookup and the sync ask for newest first, so the one a run
+# adopts is the one written last, and the ones it trashes are the older copies of it.
+NEWEST_FIRST = "modifiedTime desc"
+
 
 def _reason(error: HttpError) -> str:
     """The API's machine-readable reason for a failure, or "" if it didn't give one."""
@@ -211,15 +216,20 @@ def get_credentials(credentials_path: Path, token_path: Path) -> Credentials:
 
 
 def find_child(drive, name: str, mime_type: str | None, parent_id: str | None) -> str | None:
-    """The id of what's named `name` inside parent_id (or the Drive root), if anything is."""
+    """The id of what's named `name` inside parent_id (or the Drive root), if anything is.
+    The newest of them, if several are: a Drive folder can hold any number of files sharing a
+    name, and which of those a run picks up decides what it treats as current — so it has to
+    be the last one written rather than whichever Drive happened to list first."""
     # Escaped, not interpolated raw: a name is whatever the config says, and an apostrophe in
     # it would otherwise end the quoted string and leave Drive with a query it can't parse.
     quoted = name.replace("\\", "\\\\").replace("'", "\\'")
     q = f"name = '{quoted}' and trashed = false and '{parent_id or 'root'}' in parents"
     if mime_type:
         q += f" and mimeType = '{mime_type}'"
-    files = execute(drive.files().list(q=q, fields="files(id)", pageSize=1), "lookup").get("files", [])
-    return files[0]["id"] if files else None
+    listed = execute(
+        drive.files().list(q=q, fields="files(id)", orderBy=NEWEST_FIRST, pageSize=1), "lookup"
+    ).get("files", [])
+    return listed[0]["id"] if listed else None
 
 
 def _create_folder(drive, name: str, parent_id: str | None = None) -> str:
@@ -234,13 +244,15 @@ def _find_or_create_folder(drive, name: str, parent_id: str | None = None) -> st
 
 
 def _sync(drive, folder_id: str, wanted: set[str]) -> dict[str, dict]:
-    """Trash whatever in folder_id isn't named in wanted; return the survivors by name."""
+    """Trash whatever in folder_id isn't named in wanted; return the survivors by name.
+    Newest first, so that of several files sharing a name the survivor is the last one
+    written — the same one find_child would have looked up."""
     q = f"'{folder_id}' in parents and trashed = false"
     keep: dict[str, dict] = {}
     # permissions comes along for the ride, so checking what's already link-shared
     # costs no request of its own.
     fields = "files(id,name,mimeType,webViewLink,permissions(type,role))"
-    files = execute(drive.files().list(q=q, fields=fields, pageSize=1000), "folder listing")
+    files = execute(drive.files().list(q=q, fields=fields, orderBy=NEWEST_FIRST, pageSize=1000), "folder listing")
     for f in files.get("files", []):
         if f["name"] in wanted and f["name"] not in keep:
             keep[f["name"]] = f
