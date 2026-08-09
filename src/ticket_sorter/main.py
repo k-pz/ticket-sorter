@@ -2,6 +2,7 @@
 """Rename biletomat.pl ticket PDFs and export their metadata to a CSV."""
 import argparse
 import csv
+import os
 import re
 import shutil
 import sys
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import pypdf
 
-from .config import load_aliases, load_duplicates, load_flags, load_name, save_tables
+from .config import CONFIG_ENV, NAME_ENV, load_aliases, load_duplicates, load_flags, load_name, save_tables
 from .names import look_alikes, merge_names, resolve
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -201,8 +202,9 @@ def parse_args():
              "of the upload (requires --upload-drive; a CLI flag only, since it picks the config to read)",
     )
     parser.add_argument(
-        "--name",
-        help="name for the Drive folder, Sheet and Calendars, instead of the one in config.toml",
+        "--name", default=os.environ.get(NAME_ENV),
+        help=f"name for the Drive folder, Sheet and Calendars, instead of the one in config.toml "
+             f"(also settable as ${NAME_ENV})",
     )
     parser.add_argument(
         "--rename-input", action="store_true",
@@ -223,8 +225,9 @@ def parse_args():
     parser.add_argument("--credentials", type=Path, default=ROOT_DIR / "credentials.json", help="OAuth client secrets file")
     parser.add_argument("--token", type=Path, default=ROOT_DIR / "token.json", help="cached OAuth token file")
     parser.add_argument(
-        "--config", type=Path, default=ROOT_DIR / "config.toml",
-        help="config file holding the Drive folder/Sheet/Calendar name and upload flags (created interactively if missing)",
+        "--config", type=Path, default=Path(os.environ.get(CONFIG_ENV) or ROOT_DIR / "config.toml"),
+        help=f"config file holding the Drive folder/Sheet/Calendar name and upload flags, created interactively "
+             f"if missing (also settable as ${CONFIG_ENV})",
     )
     args = parser.parse_args()
 

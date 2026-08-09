@@ -118,6 +118,9 @@ requires an OAuth client for. It's free and takes a couple of minutes:
 5. Download the resulting JSON and save it as `credentials.json` in the project
    root (next to `pyproject.toml`). It's gitignored, so it stays local.
 
+(Or keep that JSON in `$TICKET_SORTER_OAUTH_CLIENT` instead of in a file — see
+[the whole environment](#the-whole-environment).)
+
 The first run with `--upload-drive` opens a browser tab for you to authorize,
 then caches a `token.json` (also gitignored) so later runs don't ask again.
 Delete `token.json` to re-authorize — needed after revoking access, and the
@@ -139,6 +142,11 @@ Custom paths for either file: `--credentials PATH` / `--token PATH`.
 | `--name NAME` | Name the Drive folder/Sheet/calendars, instead of `config.toml` doing it |
 | `--config PATH` | Use a different `config.toml` |
 | `--credentials PATH`, `--token PATH` | Use different Google credential files |
+
+`--name` and `--config` can also come from the environment, as
+`$TICKET_SORTER_NAME` and `$TICKET_SORTER_CONFIG`, which is how a run that has
+no command line to speak of is pointed at its config — see
+[Running it from GitHub Actions](#running-it-from-github-actions).
 
 A full run, once set up, is usually:
 
@@ -516,11 +524,12 @@ marks survive a run happening somewhere that keeps nothing — without it, every
 run starts with an empty `[aliases]` and `[duplicates]`, and a ticket you
 handed back on the Sheet comes back as a ticket on the next run.
 
-The fetched copy *replaces* the file at `--config` (the project's
-`config.toml`, unless you point it elsewhere), since it's the same config
-seen from another machine. The name is the one thing not taken from it: it's
-what found the folder in the first place, so pass `--name` or have it in the
-local file already.
+The fetched copy *replaces* the file at `--config` — the project's
+`config.toml` unless `--config PATH` or `$TICKET_SORTER_CONFIG` points
+elsewhere — since it's the same config seen from another machine. The name is
+the one thing not taken from it: it's what found the folder in the first place,
+so pass `--name` (or `$TICKET_SORTER_NAME`), or have it in the local file
+already.
 
 ## Running it from GitHub Actions
 
@@ -530,40 +539,74 @@ GitHub runner. `.github/workflows/sort-tickets.yml` does exactly the full run
 above, and you trigger it from the **Actions** tab (or uncomment its `schedule`
 to have it sort by itself every hour).
 
-Two settings, both under **Settings → Secrets and variables → Actions**:
+Nothing is passed to it on the command line but the flags: the name it goes by
+and the credentials it acts under come from its environment, so the workflow
+file has no settings of yours in it. Three of them, under **Settings → Secrets
+and variables → Actions**:
 
 | | Where | What |
 |---|---|---|
-| `TICKET_SORTER_TOKEN` | Secrets | The contents of a `token.json` from a local run |
+| `TICKET_SORTER_OAUTH_CLIENT` | Secrets | Your `credentials.json` — the OAuth client from the Cloud project |
+| `TICKET_SORTER_REFRESH_TOKEN` | Secrets | A refresh token issued to that client |
 | `TICKET_SORTER_NAME` | Variables | The name of the Drive folder, Sheet and calendars |
 
-To make the token, run it once locally with everything the Action will use, so
-the token carries the Drive *and* Calendar access it'll need:
+That's the same pair a `token.json` is made of, held as two secrets instead of
+one blob. To get the refresh token, authorize once locally with everything the
+Action will use — so it carries the Drive *and* Calendar access it'll need —
+and read it off what that leaves behind:
 
 ```sh
 uv run ticket-sorter --upload-drive --create-calendar
-cat token.json      # paste this into the TICKET_SORTER_TOKEN secret
+python3 -c "import json; print(json.load(open('token.json'))['refresh_token'])"
 ```
 
-`$TICKET_SORTER_TOKEN` is read ahead of `token.json` whenever it's set, and is
-never written back to — the refresh it needs lasts the run, and a run that got
-its token from the environment has nowhere to keep one. A run with no usable
-token and no terminal to open a browser on says that, rather than hanging on a
-browser that's never coming back.
+If you'd rather keep one secret than two, `TICKET_SORTER_TOKEN` holding the
+whole `cat token.json` works in its place and is read ahead of it. Either way,
+credentials from the environment are read ahead of `token.json` and never
+written back to: the refresh they need lasts the run, and a run given its
+credentials as secrets has nowhere of its own to keep one. A run with no usable
+credentials and no terminal to open a browser on says so, rather than hanging
+on a browser that's never coming back.
 
-Things worth knowing before you set this up:
+`$TICKET_SORTER_OAUTH_CLIENT` also stands in for `credentials.json` when
+authorizing from scratch, so a local run needn't keep that file on disk either.
+
+### The whole environment
+
+| Variable | What it holds |
+|---|---|
+| `TICKET_SORTER_CONFIG` | Where `config.toml` is, as `--config` |
+| `TICKET_SORTER_NAME` | The Drive folder/Sheet/Calendar name, as `--name` |
+| `TICKET_SORTER_OAUTH_CLIENT` | The contents of `credentials.json` |
+| `TICKET_SORTER_REFRESH_TOKEN` | A refresh token issued to that client |
+| `TICKET_SORTER_TOKEN` | The contents of a whole `token.json` |
+
+The first two are the values their flags take; the rest are the contents of
+files, so a secret never has to be written to disk. The flags themselves stay
+flags — the workflow spells them out, and they say what a run is *for* rather
+than what it's set up with.
+
+### Things worth knowing before you set this up
 
 - **While your OAuth consent screen is in "Testing", Google expires refresh
-  tokens after 7 days.** The Action then fails with an `invalid_grant` error
-  and the fix is to delete `token.json`, authorize locally again, and update
-  the secret. To stop that, hit **Publish app** on the OAuth consent screen:
-  for sensitive scopes an unverified app still works for its own owner (with a
-  warning screen at authorization time, and a cap on how many users it can
-  have), and its refresh tokens stop expiring on a weekly clock.
-- **That secret is a key to your Google account**, within the scopes the token
-  was granted: files this app created in Drive (`drive.file`), your
+  tokens after 7 days.** The Action then fails with an `invalid_grant` error,
+  and the fix is to authorize locally again and update the secret. This is a
+  property of the token, not of how you store it, so using the OAuth client and
+  a refresh token rather than a whole `token.json` doesn't change it. What does
+  is **Publish app** on the OAuth consent screen: for sensitive scopes an
+  unverified app still works for its own owner (with a warning screen at
+  authorization time, and a cap on how many users it can have), and its refresh
+  tokens stop expiring on a weekly clock.
+- **A service account from the same Cloud project won't work here**, in case
+  that seems like the way around the above. Files it creates are owned by it
+  rather than by you, and a service account has no Drive storage of its own
+  outside a Workspace shared drive, so the uploads fail with
+  `storageQuotaExceeded`; the calendars it made would be its own too. The
+  tickets have to land in *your* Drive, which means acting as you.
+- **Those secrets are a key to your Google account**, within the scopes the
+  token was granted: files this app created in Drive (`drive.file`), your
   spreadsheets, and your calendars. Anyone who can push to the repository, or
-  edit a workflow in it, can use it. GitHub doesn't hand secrets to workflows
+  edit a workflow in it, can use them. GitHub doesn't hand secrets to workflows
   from forked pull requests, but a private repository is still the right home
   for this.
 - **`--merge-names` can't run there**: it's a conversation. Merge names in a

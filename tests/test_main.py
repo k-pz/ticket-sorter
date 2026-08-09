@@ -132,6 +132,21 @@ def test_parse_args_takes_the_flag_defaults_from_the_config(argv, config_text, e
     assert (args.upload_drive, args.create_calendar) == expected
 
 
+def test_parse_args_takes_the_config_and_the_name_from_the_environment(tmp_path, monkeypatch):
+    """How a run with no flags to spare is set up: the config it reads and the name it goes
+    by both named by the environment, which is all a workflow file can hand it."""
+    config = tmp_path / "somewhere-else.toml"
+    config.write_text("upload_drive = true\n", encoding="utf-8")
+    monkeypatch.setenv("TICKET_SORTER_CONFIG", str(config))
+    monkeypatch.setenv("TICKET_SORTER_NAME", "Octopus from the environment")
+    monkeypatch.setattr(sys, "argv", ["ticket-sorter"])
+
+    args = m.parse_args()
+    assert args.config == config
+    assert args.name == "Octopus from the environment"
+    assert args.upload_drive is True  # read out of that config, so it really was the one used
+
+
 def test_parse_args_takes_input_drive_from_the_config(argv):
     argv.config.write_text("input_drive = true\n")
     assert argv.run().input_drive is True

@@ -14,6 +14,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from .colors import showing_colors, showing_key
+from .config import CLIENT_ENV, REFRESH_ENV, TOKEN_ENV
 from .main import slugify
 
 MAX_ATTEMPTS = 7  # ~1+2+4+8+16+32s of waiting before giving up
@@ -27,9 +28,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar",
 ]
 
-# An environment variable holding what the token file would, for a run with nowhere to keep
-# one and no browser to make one with — a GitHub Actions run, say.
-TOKEN_ENV = "TICKET_SORTER_TOKEN"
+TOKEN_URI = "https://oauth2.googleapis.com/token"  # where a refresh is redeemed, if the client omits it
 
 UNSORTED = "unsorted"    # the folder in the Drive folder that --input-drive reads from
 CONFIG_NAME = "config.toml"  # and the config a --config-drive run keeps beside it
@@ -91,48 +90,107 @@ def execute(request, what: str = "request"):
             time.sleep(delay)
 
 
+def _env_json(name: str, what: str) -> dict | None:
+    """What an environment variable holding a file's contents parses to, if it's set. Said
+    plainly rather than as a JSON traceback: what's in it was pasted into a secret."""
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError as error:
+        raise RuntimeError(f"${name} is set, but isn't {what}: {error}") from error
+
+
+def _oauth_client() -> dict | None:
+    """The Cloud project's OAuth client, if it was passed in the environment rather than left
+    in a file — the whole JSON the Credentials page hands you, "installed" wrapper and all."""
+    client = _env_json(CLIENT_ENV, "an OAuth client's JSON")
+    if client and not (client.get("installed") or client.get("web")):
+        raise RuntimeError(
+            f"${CLIENT_ENV} is set, but holds JSON with no 'installed' or 'web' section: pass the "
+            "whole file downloaded from the Cloud project's Credentials page, not a part of it."
+        )
+    return client
+
+
+def _from_refresh_token(client: dict, refresh_token: str) -> Credentials:
+    """Credentials built from the Cloud project's OAuth client and a refresh token issued to
+    it. That pair is what a token.json is made of, minus the expired access token it also
+    carries, so a run holding it can mint a live token of its own."""
+    details = client.get("installed") or client["web"]
+    return Credentials(
+        None,
+        refresh_token=refresh_token,
+        token_uri=details.get("token_uri", TOKEN_URI),
+        client_id=details["client_id"],
+        client_secret=details["client_secret"],
+        scopes=SCOPES,
+    )
+
+
+def _stored_credentials(token_path: Path) -> tuple[Credentials | None, bool]:
+    """What a run has to go on before it talks to Google, and whether it came from the
+    environment. Three ways in, in the order they're preferred: a whole token.json in
+    $TICKET_SORTER_TOKEN; the OAuth client and a refresh token for it, as two variables of
+    their own; and the token file a local run leaves behind."""
+    token = _env_json(TOKEN_ENV, "a token file's contents")
+    if token:
+        try:
+            return Credentials.from_authorized_user_info(token, SCOPES), True
+        except ValueError as error:
+            raise RuntimeError(f"${TOKEN_ENV} is set, but isn't a token file's contents: {error}") from error
+
+    client, refresh_token = _oauth_client(), os.environ.get(REFRESH_ENV)
+    if client and refresh_token:
+        return _from_refresh_token(client, refresh_token), True
+
+    if token_path.exists():
+        return Credentials.from_authorized_user_file(str(token_path), SCOPES), False
+    return None, False
+
+
 def _authorize(credentials_path: Path) -> Credentials:
     """Ask Google for a token from scratch, which means opening a browser. A run with no
     terminal has nobody to open one for, so it says what to set instead of hanging on a
     browser that is never coming back."""
+    client = _oauth_client()
     if not sys.stdin.isatty():
         raise RuntimeError(
             "No usable Google token, and no way to ask for one: authorizing opens a browser and "
-            "this run has no terminal. Authorize once on a machine that has one, then pass the "
-            f"contents of the token file it writes as ${TOKEN_ENV} (see README.md)."
+            "this run has no terminal. Authorize once on a machine that has one, then pass what "
+            f"that leaves behind — either the whole token file as ${TOKEN_ENV}, or the OAuth "
+            f"client as ${CLIENT_ENV} and its refresh_token as ${REFRESH_ENV} (see README.md)."
         )
-    if not credentials_path.exists():
+    if not client and not credentials_path.exists():
         raise FileNotFoundError(
             f"{credentials_path} not found. Create a Google Cloud OAuth Desktop client "
             "and save it there (see README.md)."
         )
     print("Opening browser to authorize with Google...")
-    flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
+    flow = (
+        InstalledAppFlow.from_client_config(client, SCOPES) if client
+        else InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
+    )
     return flow.run_local_server(port=0)
 
 
 def get_credentials(credentials_path: Path, token_path: Path) -> Credentials:
-    """The Google account a run acts as. $TICKET_SORTER_TOKEN, holding what the token file
-    holds, comes ahead of that file and is never written back to — the refresh it may need
-    lasts the run, and a run that got its token from the environment has nowhere to put one."""
-    from_env = os.environ.get(TOKEN_ENV)
-    creds = None
-    if from_env:
-        try:
-            creds = Credentials.from_authorized_user_info(json.loads(from_env), SCOPES)
-        except ValueError as error:
-            # Whatever was pasted into the secret, said here rather than as a JSON traceback.
-            raise RuntimeError(f"${TOKEN_ENV} is set, but isn't a token file's contents: {error}") from error
-    elif token_path.exists():
-        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            print("Refreshing Google auth token...")
-            creds.refresh(Request())
-        else:
-            creds = _authorize(credentials_path)
-        if not from_env:
-            token_path.write_text(creds.to_json())
+    """The Google account a run acts as. Credentials from the environment come ahead of the
+    token file and are never written back to: the refresh they need lasts the run, and a run
+    given its credentials as secrets has nowhere of its own to keep one."""
+    creds, from_env = _stored_credentials(token_path)
+    if creds and creds.valid:
+        return creds
+    if creds and creds.refresh_token:
+        # Also the way in for a refresh token passed on its own: it arrives with no access
+        # token at all rather than an expired one, and redeeming it is what makes it usable.
+        print("Refreshing Google auth token...")
+        creds.refresh(Request())
+    else:
+        creds = _authorize(credentials_path)
+    if not from_env:
+        token_path.write_text(creds.to_json())
     return creds
 
 

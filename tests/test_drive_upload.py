@@ -3,7 +3,7 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import unquote_plus
+from urllib.parse import quote_plus, unquote_plus
 
 import httplib2
 import pytest
@@ -105,6 +105,12 @@ def token_file(tmp_path, expiry: str) -> Path:
     return path
 
 
+CLIENT_JSON = json.dumps({"installed": {  # what the Cloud project's Credentials page hands you
+    "client_id": "c.apps.googleusercontent.com", "client_secret": "s",
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth", "token_uri": "https://oauth2.googleapis.com/token",
+}})
+
+
 @pytest.fixture
 def terminal(monkeypatch):
     """A run with a terminal, i.e. one that can open a browser to authorize. pytest's
@@ -144,6 +150,83 @@ def test_get_credentials_does_not_write_back_a_token_from_the_environment(tmp_pa
 
     assert du.get_credentials(tmp_path / "credentials.json", token).token == "fresh"
     assert not token.exists()  # the refresh lasts the run; there is nowhere to keep it
+
+
+def test_get_credentials_from_the_oauth_client_and_a_refresh_token(tmp_path, monkeypatch):
+    """The Cloud project's own credentials, as the two secrets they're made of. They arrive
+    with no access token at all rather than an expired one, so redeeming comes first."""
+    monkeypatch.setenv(du.CLIENT_ENV, CLIENT_JSON)
+    monkeypatch.setenv(du.REFRESH_ENV, "1//a-refresh-token")
+    refreshed = []
+    monkeypatch.setattr(du.Credentials, "refresh",
+                        lambda self, _request: (refreshed.append(self), setattr(self, "token", "fresh")))
+    token = tmp_path / "token.json"
+
+    creds = du.get_credentials(tmp_path / "credentials.json", token)
+    assert (creds.token, creds.refresh_token) == ("fresh", "1//a-refresh-token")
+    assert (creds.client_id, creds.client_secret) == ("c.apps.googleusercontent.com", "s")
+    assert len(refreshed) == 1
+    assert not token.exists()  # from the environment, so there is nowhere to keep it
+
+
+def test_a_refresh_token_redeems_for_a_usable_one():
+    """The pair really is enough, checked by letting google-auth redeem it over a transport
+    of ours rather than by taking its own refresh() out of the picture."""
+    posted = {}
+
+    def transport(url, method="POST", body=b"", headers=None, **kwargs):
+        posted.update(url=url, body=body.decode())
+        return SimpleNamespace(status=200, data=json.dumps({
+            "access_token": "ya29.minted", "expires_in": 3599, "token_type": "Bearer",
+            "scope": " ".join(du.SCOPES),
+        }).encode())
+
+    # No token_uri in this one, the way a client JSON trimmed down by hand would arrive.
+    creds = du._from_refresh_token({"installed": {"client_id": "c", "client_secret": "s"}}, "1//a-refresh-token")
+    assert creds.valid is False  # no access token yet, only the means to mint one
+
+    creds.refresh(transport)
+    assert (creds.token, creds.valid) == ("ya29.minted", True)
+    assert posted["url"] == du.TOKEN_URI  # defaulted, since the client didn't say
+    assert "grant_type=refresh_token" in posted["body"]
+    assert "refresh_token=1%2F%2Fa-refresh-token" in posted["body"]
+    for scope in du.SCOPES:  # all three asked for, so a token short of one fails here
+        assert quote_plus(scope) in posted["body"]
+
+
+def test_get_credentials_prefers_a_whole_token_to_the_client_pair(tmp_path, monkeypatch):
+    monkeypatch.setenv(du.TOKEN_ENV, token_json("2099-01-01T00:00:00Z", token="from-the-token"))
+    monkeypatch.setenv(du.CLIENT_ENV, CLIENT_JSON)
+    monkeypatch.setenv(du.REFRESH_ENV, "1//a-refresh-token")
+    assert du.get_credentials(tmp_path / "credentials.json", tmp_path / "token.json").token == "from-the-token"
+
+
+@pytest.mark.parametrize("value, said", [
+    ("not json at all", "isn't an OAuth client"),
+    ('{"client_id": "c", "client_secret": "s"}', "no 'installed' or 'web' section"),  # unwrapped
+])
+def test_get_credentials_says_what_is_wrong_with_the_client_it_was_given(tmp_path, monkeypatch, value, said):
+    monkeypatch.setenv(du.CLIENT_ENV, value)
+    monkeypatch.setenv(du.REFRESH_ENV, "1//a-refresh-token")
+    with pytest.raises(RuntimeError, match=said):
+        du.get_credentials(tmp_path / "credentials.json", tmp_path / "token.json")
+
+
+def test_authorizing_uses_the_client_from_the_environment(tmp_path, terminal, monkeypatch):
+    """The client alone, with no refresh token to go with it, is still the client: a local
+    run authorizes against it without credentials.json ever being on disk."""
+    monkeypatch.setenv(du.CLIENT_ENV, CLIENT_JSON)
+    authorized = SimpleNamespace(valid=True, to_json=lambda: '{"token": "new"}')
+    seen = {}
+    monkeypatch.setattr(du.InstalledAppFlow, "from_client_config", lambda config, scopes: (
+        seen.update(config=config, scopes=scopes),
+        SimpleNamespace(run_local_server=lambda port: authorized),
+    )[1])
+    token = tmp_path / "token.json"
+
+    assert du.get_credentials(tmp_path / "credentials.json", token) is authorized
+    assert seen == {"config": json.loads(CLIENT_JSON), "scopes": du.SCOPES}
+    assert token.read_text() == '{"token": "new"}'  # this one is the run's own, so it is kept
 
 
 def test_get_credentials_reuses_a_token_that_is_still_valid(tmp_path):
