@@ -8,7 +8,11 @@ name: Sort tickets
 #   TICKET_SORTER_CLIENT_ID     (secret)   the Cloud project's OAuth client, as its two halves
 #   TICKET_SORTER_CLIENT_SECRET (secret)
 #   TICKET_SORTER_REFRESH_TOKEN (secret)   a refresh token issued to that client
-#   TICKET_SORTER_NAME          (variable) the name of the Drive folder, Sheet and calendars
+#   TICKET_SORTER_NAME          (either)   the name of the Drive folder, Sheet and calendars,
+#                                          taken from the variable if there is one and from the
+#                                          secret of the same name otherwise, so that setting it
+#                                          alongside the three above works. As a secret it comes
+#                                          back masked as *** everywhere the log mentions it.
 #
 # The whole credentials.json in TICKET_SORTER_OAUTH_CLIENT works in place of the id and secret,
 # and a whole token.json in TICKET_SORTER_TOKEN in place of all three. See "Running it from
@@ -33,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      TICKET_SORTER_NAME: ${{ vars.TICKET_SORTER_NAME }}
+      TICKET_SORTER_NAME: ${{ vars.TICKET_SORTER_NAME || secrets.TICKET_SORTER_NAME }}
       TICKET_SORTER_CLIENT_ID: ${{ secrets.TICKET_SORTER_CLIENT_ID }}
       TICKET_SORTER_CLIENT_SECRET: ${{ secrets.TICKET_SORTER_CLIENT_SECRET }}
       TICKET_SORTER_REFRESH_TOKEN: ${{ secrets.TICKET_SORTER_REFRESH_TOKEN }}
@@ -52,7 +56,7 @@ jobs:
         run: |
           missing() { echo "::error::$1"; exit 1; }
           [ -n "$TICKET_SORTER_NAME" ] ||
-            missing "Set the TICKET_SORTER_NAME variable to the name of the Drive folder."
+            missing "Set TICKET_SORTER_NAME, as a secret or a variable, to the Drive folder's name."
           [ -n "$TICKET_SORTER_REFRESH_TOKEN$TICKET_SORTER_TOKEN" ] ||
             missing "Set TICKET_SORTER_REFRESH_TOKEN, with the client it belongs to. See README.md."
 
