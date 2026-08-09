@@ -76,16 +76,31 @@ in it. `input/` is never touched (unless you ask for `--rename-input` below).
 ```
 output/
 ├── tickets/
-│   ├── jan-kowalski/
-│   │   ├── motor-city-ABC123__jan-kowalski.pdf
-│   │   └── zoolander-DEF456__jan-kowalski.pdf
-│   └── anna-nowak/
-│       └── vampyres-GHI789__anna-nowak.pdf
+│   ├── by-holder/
+│   │   ├── jan-kowalski/
+│   │   │   ├── motor-city-ABC123__jan-kowalski.pdf
+│   │   │   └── zoolander-DEF456__jan-kowalski.pdf
+│   │   └── anna-nowak/
+│   │       └── vampyres-GHI789__anna-nowak.pdf
+│   └── by-showing/
+│       ├── 2026-08-11-2130-motor-city/
+│       │   └── motor-city-ABC123__jan-kowalski.pdf
+│       ├── 2026-08-12-1800-zoolander/
+│       │   └── zoolander-DEF456__jan-kowalski.pdf
+│       └── 2026-08-12-2200-vampyres/
+│           └── vampyres-GHI789__anna-nowak.pdf
 ├── duplicates/
 │   └── motor-city-JKL012.pdf
 ├── tickets.csv
 └── duplicates.csv
 ```
+
+Every sorted ticket is filed twice, under the two things you'd want to look it
+up by: **`by-holder/`** has a folder per person — what one of you is going to,
+ready to hand over whole — and **`by-showing/`** has a folder per screening,
+holding everyone who is coming to it. Showing folders lead with the start time,
+so listing `by-showing/` reads as the festival's running order, and the same
+film at two times is two folders.
 
 Every PDF under `input/` is read, subfolders included. Tickets download from
 biletomat.pl all called `bilety.pdf`, and a folder can only hold one file under
@@ -103,17 +118,20 @@ hand already, so both of those pairs are read in full.
 
 A **duplicate** is a second ticket for a showing one person is already going
 to — same person, film, time and venue. The first ticket is the one that
-counts; the rest go to `duplicates/`. (You can also mark a ticket as one by
-hand; see [Handing a showing back](#handing-a-showing-back).)
+counts; the rest go to `duplicates/`, and to neither of the two groupings — a
+showing's folder is who is going, and a second ticket for one would overstate
+that. (You can also mark a ticket as one by hand; see
+[Handing a showing back](#handing-a-showing-back).)
 
-A sorted ticket is named after its film and reservation code. One reservation
-can cover several tickets, and those would want the same name — the second gets
-`-2` before the `.pdf`, the way a second download does, rather than being left
-out of the output.
+A sorted ticket is named after its film and reservation code, and carries the
+same name in both groupings. One reservation can cover several tickets, and
+those would want the same name — the second gets `-2` before the `.pdf`, the
+way a second download does, rather than being left out of the output.
 
 Both CSVs carry the same columns: `start_time`, `end_time`, `length_min`,
 `movie`, `issued_to`, `address`, `section`, `reservation_code`, `ticket_code`,
-`file`.
+`file`. The `file` column names the `by-holder/` copy of the ticket, which is
+the one everything else — the Sheet's link, the calendar events — points at.
 
 ## 4. Google setup (once)
 
@@ -258,8 +276,8 @@ line to split that name back out. Keep it among the tables at the end of the
 file, since a run rewrites everything from the first table header down.
 
 Merging happens before tickets are sorted, so the collapsed name is the one
-used everywhere downstream: the recipient folder, the CSVs, the Sheet, and the
-calendars. It also means a show one person booked twice under two spellings is
+used everywhere downstream: the folders and file names of both groupings, the
+CSVs, the Sheet, and the calendars. It also means a show one person booked twice under two spellings is
 finally recognized as a repeat booking and moved to `duplicates/`.
 
 Runs without `--merge-names` still apply the saved aliases, and print a note
@@ -273,7 +291,11 @@ Needs the [Google setup](#4-google-setup-once) above.
 
 Add `--upload-drive` to also upload everything to a Google Drive folder
 (mirroring the `tickets/`/`duplicates/` layout, plus the two CSVs) and build a
-Google Sheet with a `Tickets` tab and a `Duplicates` tab. Each row gets a
+Google Sheet with a `Tickets` tab and a `Duplicates` tab. A file in Drive has
+one parent folder and no more, so a ticket is uploaded once — into
+`tickets/by-holder/` — and the `tickets/by-showing/` folders hold shortcuts to
+it. They open the same PDF, cost a shortcut rather than a second upload, and
+leave one file per ticket to share by link instead of two. Each row gets a
 "ticket_pdf" column that links straight to the uploaded PDF, and both tabs get
 a bold frozen header row with a filter applied so you can sort/filter them like
 a normal table.
@@ -300,9 +322,10 @@ the PDFs, off the folder listing that's read anyway), so a re-run doesn't
 re-share anything: it's ~one extra write per newly uploaded PDF and none after.
 
 Re-running syncs rather than re-uploads: a PDF already in Drive under the name
-this run would give it is left alone (its existing link is reused), and only
-files that this run wouldn't upload — tickets that changed name, recipients who
-dropped out — get moved to the trash. The two CSVs and the Sheet are always
+this run would give it is left alone (its existing link is reused), a shortcut
+already pointing at it costs nothing either, and only files that this run
+wouldn't upload — tickets that changed name, recipients who dropped out,
+showings nobody is going to any more — get moved to the trash. The two CSVs and the Sheet are always
 rewritten, since their contents change every run.
 
 That folder is the run's to keep tidy, so **don't put anything of your own in
@@ -508,6 +531,8 @@ Octopus 2026 Tickets/     <- the folder named by config.toml
 ├── unsorted/             <- you drop bilety(3).pdf in here
 │   └── ...
 ├── tickets/              <- and the run produces all of this
+│   ├── by-holder/        <- the uploaded PDFs, a folder per person
+│   └── by-showing/       <- shortcuts to them, a folder per screening
 ├── duplicates/
 ├── tickets.csv
 ├── duplicates.csv

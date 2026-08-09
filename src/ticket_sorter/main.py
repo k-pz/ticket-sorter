@@ -24,6 +24,13 @@ OUTPUT_DIR = ROOT_DIR / "output"
 TICKETS_DIR = OUTPUT_DIR / "tickets"
 DUPLICATES_DIR = OUTPUT_DIR / "duplicates"
 
+# The two ways the sorted tickets are grouped, as a subfolder of tickets/ each. Every
+# sorted ticket is filed under both: one folder per person answers "what am I going to?",
+# one folder per showing answers "who is coming to this?", and neither answer is one you
+# should have to assemble out of the other by hand.
+BY_HOLDER = "by-holder"
+BY_SHOWING = "by-showing"
+
 DATE_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}$")
 
 # Runtimes in minutes for every film on the program, from each one's "Czas"
@@ -129,6 +136,17 @@ def slugify(text: str) -> str:
     text = text.translate(str.maketrans("łŁ", "lL"))  # NFKD drops ł/Ł instead of stripping the stroke
     text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode()
     return re.sub(r"[^a-zA-Z0-9]+", "-", text).strip("-").lower()
+
+
+def showing_slug(ticket: dict) -> str:
+    """The folder one showing's tickets are grouped into: when it starts, then what's on.
+
+    Time first, so that listing by-showing/ reads as the festival's running order rather
+    than as an alphabet of film titles. The venue is left out for brevity, so one film
+    playing at two places in the same minute would share a folder — nothing a single
+    program does, and the files inside still name their holder and reservation code.
+    """
+    return f"{ticket['start_time']:%Y-%m-%d-%H%M}-{slugify(ticket['movie'])}"
 
 
 def free_path(directory: Path, name: str) -> Path:
@@ -414,7 +432,7 @@ def main():
             directory, file_name = DUPLICATES_DIR, f"{base_name}.pdf"
         else:
             slug = slugify(ticket["issued_to"])
-            directory, file_name = TICKETS_DIR / slug, f"{base_name}__{slug}.pdf"
+            directory, file_name = TICKETS_DIR / BY_HOLDER / slug, f"{base_name}__{slug}.pdf"
         directory.mkdir(parents=True, exist_ok=True)
 
         # output/ was wiped at the start of the run, so anything already sitting under this
@@ -423,7 +441,16 @@ def main():
         # instead of being left out of the output for having an unlucky name.
         new_path = free_path(directory, file_name)
         shutil.copy2(source, new_path)
+        # The by-holder copy is the ticket's one address: what the CSVs point at, and what
+        # gets uploaded and linked from the Sheet and the calendars.
         ticket["file"] = str(new_path.relative_to(OUTPUT_DIR))
+
+        # Filed a second time under the showing it's for, under the name its first copy
+        # settled on, so that the two groupings name one ticket the same way.
+        if not is_duplicate:
+            showing_dir = TICKETS_DIR / BY_SHOWING / showing_slug(ticket)
+            showing_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, free_path(showing_dir, new_path.name))
 
         renames[source] = new_path.name
         (duplicate_rows if is_duplicate else rows).append(ticket)
