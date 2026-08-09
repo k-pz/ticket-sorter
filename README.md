@@ -1,5 +1,9 @@
 # ticket-sorter
 
+> Written with AI assistance (Claude Code), reviewed by a human. It runs
+> against my own ticket PDFs and Google account, and the test suite passes —
+> but read it before you point it at yours.
+
 You bought a pile of festival tickets on [biletomat.pl](https://biletomat.pl),
 for yourself and for other people, and now you have a folder of PDFs called
 `bilety(3).pdf`. This sorts them out.
