@@ -16,7 +16,7 @@ from googleapiclient.http import MediaFileUpload
 
 from .colors import showing_colors, showing_key
 from .config import CLIENT_ENV, CLIENT_ID_ENV, CLIENT_SECRET_ENV, REFRESH_ENV, TOKEN_ENV
-from .main import slugify
+from .main import BY_HOLDER, BY_SHOWING, showing_slug, slugify
 
 MAX_ATTEMPTS = 7  # ~1+2+4+8+16+32s of waiting before giving up
 MAX_BACKOFF_S = 32
@@ -57,6 +57,11 @@ CODE_COL = HEADER.index("reservation_code")
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
+# A file in Drive has one parent folder and no more — multi-parenting was withdrawn in
+# 2020 — so the second way of grouping the tickets is folders of shortcuts pointing at the
+# PDFs the first one holds. A shortcut costs one metadata write rather than an upload, and
+# leaves one file per ticket to share by link instead of two.
+SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 
 # Drive lets a folder hold several files under one name, and orders a listing however it
 # likes unless told. Both the lookup and the sync ask for newest first, so the one a run
@@ -289,6 +294,10 @@ def _find_or_create_folder(drive, name: str, parent_id: str | None = None) -> st
     return find_child(drive, name, FOLDER_MIME, parent_id) or _create_folder(drive, name, parent_id)
 
 
+def _trash(drive, file_id: str) -> None:
+    execute(drive.files().update(fileId=file_id, body={"trashed": True}), "trash")
+
+
 def _sync(drive, folder_id: str, wanted: set[str]) -> dict[str, dict]:
     """Trash whatever in folder_id isn't named in wanted; return the survivors by name.
     Newest first, so that of several files sharing a name the survivor is the last one
@@ -296,15 +305,15 @@ def _sync(drive, folder_id: str, wanted: set[str]) -> dict[str, dict]:
     q = f"'{folder_id}' in parents and trashed = false"
     keep: dict[str, dict] = {}
     # permissions comes along for the ride, so checking what's already link-shared
-    # costs no request of its own.
-    fields = "files(id,name,mimeType,webViewLink,permissions(type,role))"
+    # costs no request of its own; so does what a shortcut points at, for the same reason.
+    fields = "files(id,name,mimeType,webViewLink,permissions(type,role),shortcutDetails(targetId))"
     files = execute(drive.files().list(q=q, fields=fields, orderBy=NEWEST_FIRST, pageSize=1000), "folder listing")
     for f in files.get("files", []):
         if f["name"] in wanted and f["name"] not in keep:
             keep[f["name"]] = f
         else:
             print(f"  removing {f['name']}")
-            execute(drive.files().update(fileId=f["id"], body={"trashed": True}), "trash")
+            _trash(drive, f["id"])
     return keep
 
 
@@ -332,12 +341,30 @@ def _share_listed(drive, file: dict) -> bool:
     return True
 
 
-def _upload_file(drive, path: Path, parent_id: str) -> str:
+def _upload_file(drive, path: Path, parent_id: str) -> dict:
     media = MediaFileUpload(str(path), mimetype="application/pdf")
     body = {"name": path.name, "parents": [parent_id]}
     file = execute(drive.files().create(body=body, media_body=media, fields="id,webViewLink"), "file upload")
     _link_share(drive, file["id"], "reader", "file sharing")  # freshly created: never shared yet
-    return file["webViewLink"]
+    return file
+
+
+def _shortcut_to(drive, existing: dict, name: str, target_id: str, parent_id: str) -> bool:
+    """File `name` in parent_id as a shortcut to target_id, and say whether one had to be
+    made. A shortcut already pointing there is left alone, so a re-run costs nothing; one
+    pointing somewhere else is replaced rather than kept, since a shortcut outlives the
+    file it names and opening a stale one gets an error page instead of a ticket."""
+    found = existing.get(name)
+    if found and found.get("shortcutDetails", {}).get("targetId") == target_id:
+        return False
+    if found:
+        _trash(drive, found["id"])
+    body = {
+        "name": name, "mimeType": SHORTCUT_MIME, "parents": [parent_id],
+        "shortcutDetails": {"targetId": target_id},
+    }
+    execute(drive.files().create(body=body, fields="id"), "shortcut create")
+    return True
 
 
 def _replace_file(drive, existing: dict, parent_id: str, name: str, path: Path, mime_type: str) -> None:
@@ -504,26 +531,33 @@ def upload_to_drive(
     tickets_id = _child_folder(drive, root, "tickets", root_id)
     duplicates_id = _child_folder(drive, root, "duplicates", root_id)
 
+    # The two groupings, as they are locally. A folder that held the recipient folders
+    # directly — anything a version before these two sorted — is trashed by the sync.
+    groupings = _sync(drive, tickets_id, {BY_HOLDER, BY_SHOWING})
+    by_holder_id = _child_folder(drive, groupings, BY_HOLDER, tickets_id)
+    by_showing_id = _child_folder(drive, groupings, BY_SHOWING, tickets_id)
+
     by_slug: dict[str, list] = {}
     for t in rows:
         by_slug.setdefault(slugify(t["issued_to"]), []).append(t)
 
     total = len(rows) + len(duplicate_rows)
     print(f"Uploading {total} PDFs (skipping any already there)...")
-    recipients = _sync(drive, tickets_id, set(by_slug))
+    recipients = _sync(drive, by_holder_id, set(by_slug))
     n, newly_shared = 0, 0
     for slug, tickets in by_slug.items():
-        folder_id = _child_folder(drive, recipients, slug, tickets_id)
+        folder_id = _child_folder(drive, recipients, slug, by_holder_id)
         existing = _sync(drive, folder_id, {Path(t["file"]).name for t in tickets})
         for t in tickets:
             n += 1
             found = existing.get(Path(t["file"]).name)
             print(f"  [{n}/{total}] {t['file']}{' (already there)' if found else ''}")
-            if found:
-                t["drive_link"] = found["webViewLink"]
-                newly_shared += _share_listed(drive, found)
+            if not found:
+                found = _upload_file(drive, output_dir / t["file"], folder_id)
             else:
-                t["drive_link"] = _upload_file(drive, output_dir / t["file"], folder_id)
+                newly_shared += _share_listed(drive, found)
+            # The id as well as the link: the by-showing shortcuts are made to point here.
+            t["drive_id"], t["drive_link"] = found["id"], found["webViewLink"]
 
     existing = _sync(drive, duplicates_id, {Path(t["file"]).name for t in duplicate_rows})
     for t in duplicate_rows:
@@ -534,9 +568,23 @@ def upload_to_drive(
             t["drive_link"] = found["webViewLink"]
             newly_shared += _share_listed(drive, found)
         else:
-            t["drive_link"] = _upload_file(drive, output_dir / t["file"], duplicates_id)
+            t["drive_link"] = _upload_file(drive, output_dir / t["file"], duplicates_id)["webViewLink"]
     if newly_shared:
         print(f"  shared {newly_shared} already-uploaded PDFs by link")
+
+    by_showing: dict[str, list] = {}
+    for t in rows:
+        by_showing.setdefault(showing_slug(t), []).append(t)
+
+    print(f"Grouping {len(rows)} tickets by showing ({len(by_showing)} of them)...")
+    showings = _sync(drive, by_showing_id, set(by_showing))
+    made = 0
+    for slug, tickets in by_showing.items():
+        folder_id = _child_folder(drive, showings, slug, by_showing_id)
+        existing = _sync(drive, folder_id, {Path(t["file"]).name for t in tickets})
+        for t in tickets:
+            made += _shortcut_to(drive, existing, Path(t["file"]).name, t["drive_id"], folder_id)
+    print(f"  {made} shortcuts added, {len(rows) - made} already pointing at their ticket")
 
     for csv_name in ("tickets.csv", "duplicates.csv"):
         csv_path = output_dir / csv_name

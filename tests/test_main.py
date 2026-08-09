@@ -35,6 +35,11 @@ def test_slugify(text, slug):
     assert m.slugify(text) == slug
 
 
+def test_showing_slug_leads_with_the_time(make_ticket):
+    """So that a listing of by-showing/ comes out in the order the festival runs in."""
+    assert m.showing_slug(make_ticket()) == "2026-08-11-2130-motor-city"
+
+
 # --- free_path and input_pdfs ------------------------------------------------------
 
 
@@ -257,6 +262,9 @@ def sorter(tmp_path, monkeypatch):
         output=tmp_path / "output",
         config=tmp_path / "config.toml",
     )
+    # the two groupings tickets/ is made of, which most of what follows asserts against
+    paths.by_holder = paths.output / "tickets" / "by-holder"
+    paths.by_showing = paths.output / "tickets" / "by-showing"
     paths.input.mkdir()
     monkeypatch.setattr(m, "INPUT_DIR", paths.input)
     monkeypatch.setattr(m, "UNSORTED_DIR", paths.unsorted)
@@ -286,14 +294,48 @@ def test_main_files_each_ticket_under_its_recipient(sorter, make_pdf):
              movie="Matrix", start="12.08.2026 18:00")
     sorter.run()
 
-    assert names_in(sorter.output / "tickets") == ["anna-nowak", "pawel-zak"]
-    assert names_in(sorter.output / "tickets" / "anna-nowak") == [
+    assert names_in(sorter.by_holder) == ["anna-nowak", "pawel-zak"]
+    assert names_in(sorter.by_holder / "anna-nowak") == [
         "motor-city-ABC123__anna-nowak.pdf"
     ]
-    assert names_in(sorter.output / "tickets" / "pawel-zak") == [
+    assert names_in(sorter.by_holder / "pawel-zak") == [
         "matrix-B7XQZ1__pawel-zak.pdf"
     ]
     assert names_in(sorter.output / "duplicates") == []
+
+
+def test_main_files_each_ticket_under_its_showing_as_well(sorter, make_pdf):
+    """The same tickets grouped the other way: a folder per showing, holding everyone
+    going to it. One film at two times is two showings, not one."""
+    make_pdf("1.pdf", into=sorter.input)
+    make_pdf("2.pdf", into=sorter.input, issued_to="Paweł Żak", reservation_code="B7XQZ1")
+    make_pdf("3.pdf", into=sorter.input, reservation_code="C3PO99", start="12.08.2026 18:00")
+    sorter.run()
+
+    assert names_in(sorter.by_showing) == ["2026-08-11-2130-motor-city", "2026-08-12-1800-motor-city"]
+    assert names_in(sorter.by_showing / "2026-08-11-2130-motor-city") == [
+        "motor-city-ABC123__anna-nowak.pdf", "motor-city-B7XQZ1__pawel-zak.pdf",
+    ]
+    assert names_in(sorter.by_showing / "2026-08-12-1800-motor-city") == [
+        "motor-city-C3PO99__anna-nowak.pdf"
+    ]
+    # and it's the same ticket in both groupings, under the one name
+    assert (sorter.by_showing / "2026-08-11-2130-motor-city" / "motor-city-ABC123__anna-nowak.pdf").read_bytes() == (
+        sorter.by_holder / "anna-nowak" / "motor-city-ABC123__anna-nowak.pdf"
+    ).read_bytes()
+
+
+def test_main_keeps_a_duplicate_out_of_both_groupings(sorter, make_pdf):
+    """A handed-back or repeated ticket belongs to duplicates/ and to neither grouping —
+    the showing's folder is who is going, so a second ticket for it would overstate that."""
+    make_pdf("1.pdf", into=sorter.input)
+    make_pdf("2.pdf", into=sorter.input, reservation_code="B7XQZ1")
+    sorter.run()
+
+    assert names_in(sorter.by_showing / "2026-08-11-2130-motor-city") == [
+        "motor-city-ABC123__anna-nowak.pdf"
+    ]
+    assert names_in(sorter.output / "duplicates") == ["motor-city-B7XQZ1.pdf"]
 
 
 def test_main_files_a_repeat_of_the_same_show_as_a_duplicate(sorter, make_pdf):
@@ -301,7 +343,7 @@ def test_main_files_a_repeat_of_the_same_show_as_a_duplicate(sorter, make_pdf):
     make_pdf("2.pdf", into=sorter.input, reservation_code="B7XQZ1")
     sorter.run()
 
-    assert names_in(sorter.output / "tickets" / "anna-nowak") == [
+    assert names_in(sorter.by_holder / "anna-nowak") == [
         "motor-city-ABC123__anna-nowak.pdf"  # the first one keeps the slot
     ]
     assert names_in(sorter.output / "duplicates") == ["motor-city-B7XQZ1.pdf"]
@@ -312,7 +354,7 @@ def test_main_does_not_call_two_people_at_one_showing_duplicates(sorter, make_pd
     make_pdf("2.pdf", into=sorter.input, issued_to="Jan Nowak", reservation_code="B7XQZ1")
     sorter.run()
 
-    assert names_in(sorter.output / "tickets") == ["anna-nowak", "jan-nowak"]
+    assert names_in(sorter.by_holder) == ["anna-nowak", "jan-nowak"]
     assert names_in(sorter.output / "duplicates") == []
 
 
@@ -321,7 +363,7 @@ def test_main_hands_back_a_ticket_marked_in_the_config(sorter, make_pdf):
     make_pdf("1.pdf", into=sorter.input)  # the only ticket for this show, marked anyway
     sorter.run()
 
-    assert names_in(sorter.output / "tickets") == []
+    assert names_in(sorter.by_holder) == []
     assert names_in(sorter.output / "duplicates") == ["motor-city-ABC123.pdf"]
 
 
@@ -331,7 +373,7 @@ def test_main_leaves_the_slot_open_for_a_marked_shows_other_ticket(sorter, make_
     make_pdf("2.pdf", into=sorter.input, reservation_code="B7XQZ1")
     sorter.run()
 
-    assert names_in(sorter.output / "tickets" / "anna-nowak") == [
+    assert names_in(sorter.by_holder / "anna-nowak") == [
         "motor-city-B7XQZ1__anna-nowak.pdf"
     ]
     assert names_in(sorter.output / "duplicates") == ["motor-city-ABC123.pdf"]
@@ -363,7 +405,7 @@ def test_main_untick_on_the_sheet_beats_a_stored_mark(sorter, make_pdf, monkeypa
     monkeypatch.setattr(drive_upload, "upload_to_drive", lambda *a, **kw: ("f", "s"))
     sorter.run("--upload-drive")
 
-    assert names_in(sorter.output / "tickets" / "anna-nowak") == [
+    assert names_in(sorter.by_holder / "anna-nowak") == [
         "motor-city-ABC123__anna-nowak.pdf"
     ]
     assert names_in(sorter.output / "duplicates") == ["matrix-B7XQZ1.pdf"]
@@ -378,8 +420,8 @@ def test_main_merge_names_files_both_spellings_under_one_recipient(sorter, make_
     monkeypatch.setattr(sys, "stdin", io.StringIO("1 2\n2\n"))  # merge both, keep the full name, then EOF
     sorter.run("--merge-names")
 
-    assert names_in(sorter.output / "tickets") == ["anna-nowak"]
-    assert names_in(sorter.output / "tickets" / "anna-nowak") == [
+    assert names_in(sorter.by_holder) == ["anna-nowak"]
+    assert names_in(sorter.by_holder / "anna-nowak") == [
         "matrix-B7XQZ1__anna-nowak.pdf",
         "motor-city-ABC123__anna-nowak.pdf",
     ]
@@ -392,8 +434,8 @@ def test_main_collapses_an_alias_into_one_recipient(sorter, make_pdf):
     make_pdf("2.pdf", into=sorter.input)
     sorter.run()
 
-    assert names_in(sorter.output / "tickets") == ["anna-nowak"]
-    assert names_in(sorter.output / "tickets" / "anna-nowak") == [
+    assert names_in(sorter.by_holder) == ["anna-nowak"]
+    assert names_in(sorter.by_holder / "anna-nowak") == [
         "matrix-B7XQZ1__anna-nowak.pdf",
         "motor-city-ABC123__anna-nowak.pdf",
     ]
@@ -441,7 +483,7 @@ def test_main_does_not_sort_one_ticket_twice_over_a_copy_of_its_file(sorter, mak
     shutil.copy2(source, sorter.input / "spare" / "bilety.pdf")
     sorter.run()
 
-    assert names_in(sorter.output / "tickets" / "anna-nowak") == [
+    assert names_in(sorter.by_holder / "anna-nowak") == [
         "motor-city-ABC123__anna-nowak.pdf"
     ]
     assert names_in(sorter.output / "duplicates") == []
@@ -456,7 +498,7 @@ def test_main_reads_the_pdfs_in_subfolders_of_the_input(sorter, make_pdf):
              reservation_code="B7XQZ1", movie="Matrix", start="12.08.2026 18:00")
     sorter.run()
 
-    assert names_in(sorter.output / "tickets") == ["anna-nowak", "pawel-zak"]
+    assert names_in(sorter.by_holder) == ["anna-nowak", "pawel-zak"]
     assert len(read_csv(sorter.output / "tickets.csv")) == 3  # header plus both tickets
 
 
@@ -488,7 +530,8 @@ def test_main_writes_both_csvs_sorted_by_start_time(sorter, make_pdf):
     assert [(row[0], row[7]) for row in tickets] == [
         ("2026-08-11 21:30", "EARLY1"), ("2026-08-12 18:00", "LATE01"),
     ]
-    assert tickets[0][-1] == "tickets/anna-nowak/motor-city-EARLY1__anna-nowak.pdf"
+    # the by-holder copy is the one the CSV points at, of the two each ticket is filed as
+    assert tickets[0][-1] == "tickets/by-holder/anna-nowak/motor-city-EARLY1__anna-nowak.pdf"
 
     duplicates = read_csv(sorter.output / "duplicates.csv")[1:]
     assert [(row[0], row[7]) for row in duplicates] == [
@@ -528,7 +571,7 @@ def test_main_input_drive_sorts_what_it_downloaded(sorter, from_drive, make_pdf)
     make_pdf("local.pdf", into=sorter.input, reservation_code="LOCAL1")  # input/ is not read at all
     sorter.run("--input-drive", "--name", "Octopus")
 
-    assert names_in(sorter.output / "tickets" / "anna-nowak") == [
+    assert names_in(sorter.by_holder / "anna-nowak") == [
         "matrix-B7XQZ1__anna-nowak.pdf", "motor-city-ABC123__anna-nowak.pdf"
     ]
     assert names_in(sorter.output / "duplicates") == []
@@ -560,7 +603,7 @@ def test_main_input_drive_end_to_end(sorter, make_pdf, fake_google, tmp_path):
     sorter.run("--input-drive", "--name", "Octopus")
 
     assert names_in(sorter.unsorted) == ["bilety.pdf"]  # under the name it has in Drive
-    assert names_in(sorter.output / "tickets" / "anna-nowak") == ["motor-city-ABC123__anna-nowak.pdf"]
+    assert names_in(sorter.by_holder / "anna-nowak") == ["motor-city-ABC123__anna-nowak.pdf"]
 
 
 def test_main_config_drive_hands_the_config_back_to_the_upload(sorter, make_pdf, monkeypatch):
@@ -602,4 +645,4 @@ def test_main_wipes_the_output_directory_first(sorter, make_pdf):
     sorter.run()
 
     assert not stray.exists()
-    assert names_in(sorter.output / "tickets") == ["anna-nowak"]
+    assert names_in(sorter.by_holder) == ["anna-nowak"]
