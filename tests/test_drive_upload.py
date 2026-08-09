@@ -1,6 +1,9 @@
 """Drive/Sheets syncing: the pure decisions, the retry policy, then the requests sent."""
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import unquote_plus
 
 import httplib2
 import pytest
@@ -88,19 +91,59 @@ def test_execute_gives_up_after_max_attempts(fake_google):
 # --- credentials -------------------------------------------------------------------
 
 
-def token_file(tmp_path, expiry: str) -> Path:
-    """A cached authorized-user token, expiring whenever the caller says."""
-    path = tmp_path / "token.json"
-    path.write_text(json.dumps({
-        "token": "cached", "refresh_token": "r", "client_id": "c", "client_secret": "s",
+def token_json(expiry: str, token: str = "cached") -> str:
+    """A stored authorized-user token, expiring whenever the caller says."""
+    return json.dumps({
+        "token": token, "refresh_token": "r", "client_id": "c", "client_secret": "s",
         "scopes": du.SCOPES, "expiry": expiry,
-    }))
+    })
+
+
+def token_file(tmp_path, expiry: str) -> Path:
+    path = tmp_path / "token.json"
+    path.write_text(token_json(expiry))
     return path
 
 
-def test_get_credentials_without_a_client_secret_says_where_to_put_one(tmp_path):
+@pytest.fixture
+def terminal(monkeypatch):
+    """A run with a terminal, i.e. one that can open a browser to authorize. pytest's
+    captured stdin isn't one, which is what the headless path is tested through below."""
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+
+
+def test_get_credentials_without_a_client_secret_says_where_to_put_one(tmp_path, terminal):
     with pytest.raises(FileNotFoundError, match=r"credentials\.json"):
         du.get_credentials(tmp_path / "credentials.json", tmp_path / "token.json")
+
+
+def test_get_credentials_without_a_terminal_says_what_to_set_instead(tmp_path):
+    # A GitHub Actions run with no token: the browser flow would hang forever unwatched.
+    (tmp_path / "credentials.json").write_text("{}")
+    with pytest.raises(RuntimeError, match=du.TOKEN_ENV):
+        du.get_credentials(tmp_path / "credentials.json", tmp_path / "token.json")
+
+
+def test_get_credentials_prefers_the_token_in_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv(du.TOKEN_ENV, token_json("2099-01-01T00:00:00Z", token="from-env"))
+    token = token_file(tmp_path, "2099-01-01T00:00:00Z")  # a token file too, and it loses
+    assert du.get_credentials(tmp_path / "credentials.json", token).token == "from-env"
+
+
+@pytest.mark.parametrize("value", ["not json at all", '{"token": "t"}'])  # nor a token, without the rest
+def test_get_credentials_says_what_is_wrong_with_the_token_it_was_given(tmp_path, monkeypatch, value):
+    monkeypatch.setenv(du.TOKEN_ENV, value)
+    with pytest.raises(RuntimeError, match=f"^\\${du.TOKEN_ENV} is set"):
+        du.get_credentials(tmp_path / "credentials.json", tmp_path / "token.json")
+
+
+def test_get_credentials_does_not_write_back_a_token_from_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv(du.TOKEN_ENV, token_json("2000-01-01T00:00:00Z", token="from-env"))
+    monkeypatch.setattr(du.Credentials, "refresh", lambda self, _request: setattr(self, "token", "fresh"))
+    token = tmp_path / "token.json"
+
+    assert du.get_credentials(tmp_path / "credentials.json", token).token == "fresh"
+    assert not token.exists()  # the refresh lasts the run; there is nowhere to keep it
 
 
 def test_get_credentials_reuses_a_token_that_is_still_valid(tmp_path):
@@ -219,6 +262,37 @@ def test_sync_keeps_one_per_wanted_name_and_trashes_the_rest(fake_google):
     assert bodies(http)[1:] == [{"trashed": True}] * 2
 
 
+def test_sync_keeps_what_no_run_uploads(fake_google):
+    """The drop folder --input-drive reads from, and the config --config-drive keeps beside
+    it, are in the root folder without being this run's output — and the drop folder holds
+    the only copy of what's in it."""
+    drive, http = service(fake_google, [{"files": [
+        {"id": "1", "name": "unsorted", "mimeType": du.FOLDER_MIME},
+        {"id": "2", "name": "config.toml"},
+    ]}])
+    assert set(du._sync(drive, "folder", {"tickets"} | du.KEPT_IN_ROOT)) == {"unsorted", "config.toml"}
+    assert len(http.request_sequence) == 1  # the listing, and nothing trashed
+
+
+# --- find_child --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name, quoted", [
+    ("Octopus 2026", "Octopus 2026"),
+    ("Kim's Video", r"Kim\'s Video"),  # an apostrophe would otherwise close the query's string
+])
+def test_find_child_quotes_the_name_it_looks_for(fake_google, name, quoted):
+    drive, http = service(fake_google, [{"files": [{"id": "F1"}]}])
+    assert du.find_child(drive, name, du.FOLDER_MIME, "ROOT") == "F1"
+    assert f"name = '{quoted}'" in unquote_plus(uris(http)[0])
+
+
+def test_find_child_without_a_mime_type_takes_whatever_is_named_that(fake_google):
+    drive, http = service(fake_google, [{"files": []}])
+    assert du.find_child(drive, "config.toml", None, "ROOT") is None
+    assert "mimeType" not in unquote_plus(uris(http)[0])
+
+
 # --- read_sheet_marks --------------------------------------------------------------
 
 
@@ -323,19 +397,23 @@ def test_upload_to_drive(fake_google, make_pdf, make_ticket, tmp_path):
 def test_upload_to_drive_reuses_the_sheet_and_replaces_what_changed(fake_google, tmp_path):
     (tmp_path / "tickets.csv").write_text("reservation_code\n")
     (tmp_path / "duplicates.csv").write_text("reservation_code\n")
+    config = tmp_path / "config.toml"
+    config.write_text('name = "Octopus"\n')
     responses = [
         {"files": [{"id": "ROOT"}]},  # root folder lookup: already there
-        {"files": [  # and it holds last run's Sheet, folders and CSVs
+        {"files": [  # and it holds last run's Sheet, folders, CSVs and config
             {"id": "SS1", "name": "Octopus", "mimeType": du.SHEET_MIME},
             {"id": "TICKETS", "name": "tickets", "mimeType": du.FOLDER_MIME},
             {"id": "DUPES", "name": "duplicates", "mimeType": du.FOLDER_MIME},
             {"id": "CSV1", "name": "tickets.csv"},
             {"id": "CSV2", "name": "duplicates.csv"},
+            {"id": "CFG", "name": "config.toml"},
+            {"id": "DROP", "name": "unsorted", "mimeType": du.FOLDER_MIME},  # what the next run reads
         ]},
         {"files": [{"id": "OLD", "name": "ania", "mimeType": du.FOLDER_MIME}]},  # sync tickets/
         {},                            # nobody has tickets this run, so her folder goes
         {"files": []},                 # sync duplicates/: nothing to upload
-        {}, {},                        # both CSVs, replaced in place
+        {}, {}, {},                    # both CSVs and the config, replaced in place
         {"sheets": [  # the Sheet's tabs, looked up instead of created
             {"properties": {"title": "Tickets", "sheetId": 0}},
             {"properties": {"title": "Duplicates", "sheetId": 11}},
@@ -346,7 +424,7 @@ def test_upload_to_drive_reuses_the_sheet_and_replaces_what_changed(fake_google,
         {"permissions": [{"id": "p1", "type": "anyone", "role": "writer"}]},  # already shared
     ]
     http = fake_google(du, responses)
-    _folder_url, sheet_url = du.upload_to_drive([], [], tmp_path, "Octopus", *CREDS)
+    _folder_url, sheet_url = du.upload_to_drive([], [], tmp_path, "Octopus", *CREDS, config_path=config)
 
     assert sheet_url == "https://docs.google.com/spreadsheets/d/SS1/edit"
     # Nothing created, nothing shared again: exactly the reuse path and no more.
@@ -355,8 +433,9 @@ def test_upload_to_drive_reuses_the_sheet_and_replaces_what_changed(fake_google,
     assert [u.split("/values/")[1] for u in uris(http) if ":clear" in u] == [
         "Tickets:clear?alt=json", "Duplicates:clear?alt=json"
     ]
-    # The recipient folder is trashed, and the CSVs are overwritten (their bodies are the
-    # files themselves, so they read back as None) rather than uploaded beside the old ones.
+    # The recipient folder is trashed, and the CSVs and config are overwritten (their bodies
+    # are the files themselves, so they read back as None) rather than left beside the old
+    # ones. The drop folder this run didn't upload is not trashed for it: nothing else has it.
     assert [(u.split("/files/")[1].split("?")[0], b)
             for (u, method, *_), b in zip(http.request_sequence, bodies(http), strict=True) if method == "PATCH"
-            ] == [("OLD", {"trashed": True}), ("CSV1", None), ("CSV2", None)]
+            ] == [("OLD", {"trashed": True}), ("CSV1", None), ("CSV2", None), ("CFG", None)]

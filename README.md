@@ -17,8 +17,11 @@ it was issued to, reservation code) and hands back:
 
 Optionally, it can also put all of that in Google Drive with a linked
 spreadsheet, and give each person a Google Calendar of their showings with
-their ticket attached to every event. Those parts need a bit of Google setup
-and are described further down — the basic sorting needs none of it.
+their ticket attached to every event. It can just as well *read* the PDFs from
+that same Drive folder, which is what lets the whole thing run from a GitHub
+Action: you drop tickets into a folder, and everything else updates itself.
+Those parts need a bit of Google setup and are described further down — the
+basic sorting needs none of it.
 
 Film runtimes (used for the end times and the calendar events) come from a
 lookup table in `src/ticket_sorter/main.py`, taken off each film's page on
@@ -95,7 +98,8 @@ Both CSVs carry the same columns: `start_time`, `end_time`, `length_min`,
 
 ## 4. Google setup (once)
 
-Only needed for `--upload-drive` and `--create-calendar`. Skip this section if
+Only needed for the flags that talk to Google — `--upload-drive`,
+`--create-calendar`, `--input-drive`, `--config-drive`. Skip this section if
 you just want the sorted folders.
 
 The script acts as you against your own Drive and Calendar, which Google
@@ -127,9 +131,12 @@ Custom paths for either file: `--credentials PATH` / `--token PATH`.
 | Flag | What it does |
 |---|---|
 | `--merge-names` | Ask which name spellings are the same person, before sorting |
-| `--rename-input` | Also rename the PDFs in `input/` in place |
+| `--rename-input` | Also rename the input PDFs in place |
 | `--upload-drive` | Upload to Google Drive and build a linked Sheet |
 | `--create-calendar` | One Google Calendar per person (needs `--upload-drive`) |
+| `--input-drive` | Read the input PDFs from `unsorted/` in the Drive folder, not `input/` |
+| `--config-drive` | Keep `config.toml` in the Drive folder (needs `--upload-drive`) |
+| `--name NAME` | Name the Drive folder/Sheet/calendars, instead of `config.toml` doing it |
 | `--config PATH` | Use a different `config.toml` |
 | `--credentials PATH`, `--token PATH` | Use different Google credential files |
 
@@ -139,8 +146,8 @@ A full run, once set up, is usually:
 uv run ticket-sorter --merge-names --upload-drive --create-calendar
 ```
 
-`--upload-drive` and `--create-calendar` can also be turned on permanently in
-`config.toml`, so you don't have to type them every time:
+`--upload-drive`, `--create-calendar` and `--input-drive` can also be turned on
+permanently in `config.toml`, so you don't have to type them every time:
 
 ```toml
 upload_drive = true
@@ -148,7 +155,9 @@ create_calendar = true
 ```
 
 A flag is on if either the CLI flag or the config value is true; passing the
-CLI flag can't turn off one the config enabled.
+CLI flag can't turn off one the config enabled. `--config-drive` is the one
+flag with no config equivalent: it decides which `config.toml` a run reads, so
+by the time that file is read it has already had its say.
 
 ---
 
@@ -162,6 +171,10 @@ rename, not a copy: the file stays in `input/`, and this is independent of
 ```sh
 uv run ticket-sorter --rename-input
 ```
+
+With `--input-drive` it renames the files in the Drive folder the input came
+from instead — renaming the downloaded copies would be renaming what gets
+thrown away at the end of the run.
 
 ## Collapsing one person's several names
 
@@ -448,7 +461,117 @@ name = "Octopus 2026 Tickets"
 If `config.toml` doesn't exist yet, the first `--upload-drive` run asks for a
 name on the command line and creates the file for you, so future runs don't
 ask again. Edit the file (or delete it to be asked again) to change the name;
-custom path: `--config PATH`.
+custom path: `--config PATH`. `--name NAME` overrides it for one run, and is
+how a run with nobody to ask — a GitHub Action — gets one.
+
+## Taking the input from Drive
+
+`--input-drive` reads the ticket PDFs out of a folder called `unsorted` inside
+the Drive folder everything is sorted into, instead of out of local `input/`:
+
+```
+Octopus 2026 Tickets/     <- the folder named by config.toml
+├── unsorted/             <- you drop bilety(3).pdf in here
+│   └── ...
+├── tickets/              <- and the run produces all of this
+├── duplicates/
+├── tickets.csv
+├── duplicates.csv
+└── Octopus 2026 Tickets  <- the Sheet
+```
+
+Create that `unsorted` folder yourself the first time (in Drive, inside the
+folder named by `config.toml`) and put the PDFs in it. Then:
+
+```sh
+uv run ticket-sorter --input-drive --upload-drive --create-calendar
+```
+
+Notes:
+
+- **The PDFs you drop in stay there.** That folder is the drop point, not a
+  queue that gets drained, and re-sorting the same tickets costs a download and
+  changes nothing else — every later step syncs rather than rebuilds.
+- They're downloaded to `unsorted/` in the project directory, which is wiped
+  and refilled on each run exactly like `output/` is. Nothing but the download
+  lives there, so don't put anything of your own in it either.
+- Two files in one Drive folder are allowed to share a name, and tickets tend
+  to all arrive called `bilety.pdf`; the second one downloaded becomes
+  `bilety-2.pdf` locally. It makes no difference to the sorting, which reads
+  names out of the PDFs rather than off them.
+- Anything in `unsorted` that isn't a PDF is skipped with a note, the same way
+  a stray file in `input/` is.
+- **A run that would sort nothing stops instead**, saying so, when that folder
+  is missing or holds no PDFs. Sorting nothing isn't a quiet no-op here: the
+  upload syncs, so it would take every ticket, row and event an earlier run
+  created back out of Drive. To empty it all on purpose, delete the Drive
+  folder.
+
+### Keeping the config in Drive too
+
+`--config-drive` (which needs `--upload-drive`) keeps `config.toml` in the
+Drive folder: it's fetched before the run reads anything, and written back with
+the rest of the upload. That's what makes the merged names and the duplicate
+marks survive a run happening somewhere that keeps nothing — without it, every
+run starts with an empty `[aliases]` and `[duplicates]`, and a ticket you
+handed back on the Sheet comes back as a ticket on the next run.
+
+The fetched copy *replaces* the file at `--config` (the project's
+`config.toml`, unless you point it elsewhere), since it's the same config
+seen from another machine. The name is the one thing not taken from it: it's
+what found the folder in the first place, so pass `--name` or have it in the
+local file already.
+
+## Running it from GitHub Actions
+
+With the input and the config both in Drive, a run needs nothing of its own on
+the machine it happens on except a way to authorize — so it can happen on a
+GitHub runner. `.github/workflows/sort-tickets.yml` does exactly the full run
+above, and you trigger it from the **Actions** tab (or uncomment its `schedule`
+to have it sort by itself every hour).
+
+Two settings, both under **Settings → Secrets and variables → Actions**:
+
+| | Where | What |
+|---|---|---|
+| `TICKET_SORTER_TOKEN` | Secrets | The contents of a `token.json` from a local run |
+| `TICKET_SORTER_NAME` | Variables | The name of the Drive folder, Sheet and calendars |
+
+To make the token, run it once locally with everything the Action will use, so
+the token carries the Drive *and* Calendar access it'll need:
+
+```sh
+uv run ticket-sorter --upload-drive --create-calendar
+cat token.json      # paste this into the TICKET_SORTER_TOKEN secret
+```
+
+`$TICKET_SORTER_TOKEN` is read ahead of `token.json` whenever it's set, and is
+never written back to — the refresh it needs lasts the run, and a run that got
+its token from the environment has nowhere to keep one. A run with no usable
+token and no terminal to open a browser on says that, rather than hanging on a
+browser that's never coming back.
+
+Things worth knowing before you set this up:
+
+- **While your OAuth consent screen is in "Testing", Google expires refresh
+  tokens after 7 days.** The Action then fails with an `invalid_grant` error
+  and the fix is to delete `token.json`, authorize locally again, and update
+  the secret. To stop that, hit **Publish app** on the OAuth consent screen:
+  for sensitive scopes an unverified app still works for its own owner (with a
+  warning screen at authorization time, and a cap on how many users it can
+  have), and its refresh tokens stop expiring on a weekly clock.
+- **That secret is a key to your Google account**, within the scopes the token
+  was granted: files this app created in Drive (`drive.file`), your
+  spreadsheets, and your calendars. Anyone who can push to the repository, or
+  edit a workflow in it, can use it. GitHub doesn't hand secrets to workflows
+  from forked pull requests, but a private repository is still the right home
+  for this.
+- **`--merge-names` can't run there**: it's a conversation. Merge names in a
+  local run with `--config-drive` (any run with it, including one that also
+  uses `--input-drive`), and the answers land in the `config.toml` kept in
+  Drive, which every later Action run reads.
+- Runs are serialized by a `concurrency` group. Two runs sorting one folder at
+  once would each trash what the other had just uploaded.
 
 ## Tests and QA
 
@@ -460,8 +583,8 @@ The pieces run on their own too: `poe lint` (ruff), `poe types` (ty), `poe test`
 (pytest). `poe format` (`ruff format`) is deliberately left out of `qa` — the
 source is wrapped by hand and the formatter would rewrap it.
 
-Nothing in the suite talks to Google or reads the real `input/`, `output/` or
-`config.toml`. Ticket PDFs are generated with pypdf and parsed back through it,
+Nothing in the suite talks to Google or reads the real `input/`, `unsorted/`,
+`output/` or `config.toml`. Ticket PDFs are generated with pypdf and parsed back through it,
 and the Google clients are real `googleapiclient` services running on
 `HttpMockSequence`, so requests are still built and checked against each API's
 discovery document.

@@ -132,10 +132,46 @@ def test_parse_args_takes_the_flag_defaults_from_the_config(argv, config_text, e
     assert (args.upload_drive, args.create_calendar) == expected
 
 
+def test_parse_args_takes_input_drive_from_the_config(argv):
+    argv.config.write_text("input_drive = true\n")
+    assert argv.run().input_drive is True
+
+
 def test_parse_args_rejects_a_calendar_without_drive(argv, capsys):
     with pytest.raises(SystemExit):
         argv.run("--create-calendar")
     assert "--create-calendar requires --upload-drive" in capsys.readouterr().err
+
+
+def test_parse_args_rejects_a_drive_config_it_could_not_write_back(argv, capsys, monkeypatch):
+    from ticket_sorter import drive_input
+
+    monkeypatch.setattr(drive_input, "download_config", lambda *a: False)
+    with pytest.raises(SystemExit):
+        argv.run("--config-drive", "--name", "Octopus")
+    assert "--config-drive requires --upload-drive" in capsys.readouterr().err
+
+
+def test_parse_args_reads_its_flags_off_the_config_it_fetched(argv, monkeypatch):
+    """The fetch has to happen before the file is read, or a run driven from Drive would
+    take its flags from whatever the machine it happens on holds — nothing, in CI."""
+    from ticket_sorter import drive_input
+
+    def download_config(name, dest, *_credentials):
+        assert name == "Octopus"
+        dest.write_text("upload_drive = true\ncreate_calendar = true\n", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(drive_input, "download_config", download_config)
+    args = argv.run("--config-drive", "--name", "Octopus")
+    assert (args.upload_drive, args.create_calendar) == (True, True)
+
+
+def test_resolve_name_prefers_the_flag_over_the_config(tmp_path):
+    config = tmp_path / "config.toml"
+    config.write_text('name = "From the config"\n', encoding="utf-8")
+    assert m.resolve_name(SimpleNamespace(name="From the flag", config=config)) == "From the flag"
+    assert m.resolve_name(SimpleNamespace(name=None, config=config)) == "From the config"
 
 
 # --- main --------------------------------------------------------------------------
@@ -146,11 +182,13 @@ def sorter(tmp_path, monkeypatch):
     """A full run against tmp_path, with both upload flags left off."""
     paths = SimpleNamespace(
         input=tmp_path / "input",
+        unsorted=tmp_path / "unsorted",
         output=tmp_path / "output",
         config=tmp_path / "config.toml",
     )
     paths.input.mkdir()
     monkeypatch.setattr(m, "INPUT_DIR", paths.input)
+    monkeypatch.setattr(m, "UNSORTED_DIR", paths.unsorted)
     monkeypatch.setattr(m, "OUTPUT_DIR", paths.output)
     monkeypatch.setattr(m, "TICKETS_DIR", paths.output / "tickets")
     monkeypatch.setattr(m, "DUPLICATES_DIR", paths.output / "duplicates")
@@ -251,7 +289,7 @@ def test_main_untick_on_the_sheet_beats_a_stored_mark(sorter, make_pdf, monkeypa
     make_pdf("2.pdf", into=sorter.input, reservation_code="B7XQZ1", movie="Matrix", start="12.08.2026 18:00")
     # B7XQZ1 ticked on the Tickets tab, ABC123 unticked on the Duplicates tab: the way back
     monkeypatch.setattr(drive_upload, "read_sheet_marks", lambda *a: ({"B7XQZ1"}, {"ABC123"}))
-    monkeypatch.setattr(drive_upload, "upload_to_drive", lambda *a: ("f", "s"))
+    monkeypatch.setattr(drive_upload, "upload_to_drive", lambda *a, **kw: ("f", "s"))
     sorter.run("--upload-drive")
 
     assert names_in(sorter.output / "tickets" / "anna-nowak") == [
@@ -341,6 +379,104 @@ def test_main_writes_both_csvs_sorted_by_start_time(sorter, make_pdf):
     assert [(row[0], row[7]) for row in duplicates] == [
         ("2026-08-11 21:30", "EARLY2"), ("2026-08-12 18:00", "LATE02"),
     ]
+
+
+# --- input taken from Drive --------------------------------------------------------
+
+
+@pytest.fixture
+def from_drive(sorter, make_pdf, monkeypatch):
+    """A run whose input is downloaded rather than found in input/. The download itself is
+    drive_input's to test; what's stood in for here is only its result — PDFs in the scratch
+    directory, and what each of them came from in Drive."""
+    from ticket_sorter import drive_input
+
+    drive = SimpleNamespace(renamed=None)
+
+    def download_unsorted(name, dest_dir, *_credentials):
+        assert (name, dest_dir) == ("Octopus", sorter.unsorted)
+        dest_dir.mkdir(parents=True)
+        return {
+            make_pdf("bilety.pdf", into=dest_dir): {"id": "F1", "name": "bilety.pdf"},
+            make_pdf("matrix-B7XQZ1__anna-nowak.pdf", into=dest_dir, movie="Matrix",
+                     reservation_code="B7XQZ1", start="12.08.2026 18:00"):
+                {"id": "F2", "name": "matrix-B7XQZ1__anna-nowak.pdf"},  # already named as its ticket
+        }
+
+    monkeypatch.setattr(drive_input, "download_unsorted", download_unsorted)
+    monkeypatch.setattr(drive_input, "rename_unsorted",
+                        lambda new_names, *_credentials: setattr(drive, "renamed", new_names))
+    return drive
+
+
+def test_main_input_drive_sorts_what_it_downloaded(sorter, from_drive, make_pdf):
+    make_pdf("local.pdf", into=sorter.input, reservation_code="LOCAL1")  # input/ is not read at all
+    sorter.run("--input-drive", "--name", "Octopus")
+
+    assert names_in(sorter.output / "tickets" / "anna-nowak") == [
+        "matrix-B7XQZ1__anna-nowak.pdf", "motor-city-ABC123__anna-nowak.pdf"
+    ]
+    assert names_in(sorter.output / "duplicates") == []
+
+
+def test_main_input_drive_renames_in_drive_rather_than_in_the_copy(sorter, from_drive):
+    sorter.run("--input-drive", "--rename-input", "--name", "Octopus")
+
+    # Only the one whose Drive name isn't already what its ticket is called, and the
+    # downloaded copies — thrown away with the scratch directory — are left as they are.
+    assert from_drive.renamed == {"F1": "motor-city-ABC123__anna-nowak.pdf"}
+    assert names_in(sorter.unsorted) == ["bilety.pdf", "matrix-B7XQZ1__anna-nowak.pdf"]
+
+
+def test_main_input_drive_end_to_end(sorter, make_pdf, fake_google, tmp_path):
+    """The one input-from-Drive test that stands in for nothing but the transport: main and
+    drive_input as they are, so the shape one hands the other is held to on both sides."""
+    from ticket_sorter import drive_input
+
+    fake_google(drive_input, [
+        {"files": [{"id": "ROOT"}]},   # the Drive folder
+        {"files": [{"id": "DROP"}]},   # the unsorted folder in it
+        {"files": [
+            {"id": "F1", "name": "bilety.pdf", "mimeType": "application/pdf"},
+            {"id": "F2", "name": "faktura.txt", "mimeType": "text/plain"},
+        ]},
+        make_pdf("dropped.pdf").read_bytes(),  # and the one PDF among them, downloaded
+    ])
+    sorter.run("--input-drive", "--name", "Octopus")
+
+    assert names_in(sorter.unsorted) == ["bilety.pdf"]  # under the name it has in Drive
+    assert names_in(sorter.output / "tickets" / "anna-nowak") == ["motor-city-ABC123__anna-nowak.pdf"]
+
+
+def test_main_config_drive_hands_the_config_back_to_the_upload(sorter, make_pdf, monkeypatch):
+    from ticket_sorter import drive_input, drive_upload
+
+    uploaded = {}
+
+    def upload_to_drive(*_args, **kwargs):
+        uploaded.update(kwargs)
+        return "folder", "sheet"
+
+    monkeypatch.setattr(drive_input, "download_config", lambda *_a: False)
+    monkeypatch.setattr(drive_upload, "read_sheet_marks", lambda *a: (set(), set()))
+    monkeypatch.setattr(drive_upload, "upload_to_drive", upload_to_drive)
+    make_pdf("1.pdf", into=sorter.input)
+    sorter.run("--config-drive", "--upload-drive", "--name", "Octopus")
+
+    assert uploaded == {"config_path": sorter.config}  # so the next run starts where this one ended
+
+
+def test_main_without_config_drive_leaves_the_config_out_of_the_upload(sorter, make_pdf, monkeypatch):
+    from ticket_sorter import drive_upload
+
+    uploaded = {}
+    monkeypatch.setattr(drive_upload, "read_sheet_marks", lambda *a: (set(), set()))
+    monkeypatch.setattr(drive_upload, "upload_to_drive",
+                        lambda *_a, **kw: (uploaded.update(kw), ("folder", "sheet"))[1])
+    make_pdf("1.pdf", into=sorter.input)
+    sorter.run("--upload-drive", "--name", "Octopus")
+
+    assert uploaded == {"config_path": None}
 
 
 def test_main_wipes_the_output_directory_first(sorter, make_pdf):

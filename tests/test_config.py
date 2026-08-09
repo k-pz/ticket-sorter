@@ -1,15 +1,23 @@
 """config.py: reading config.toml, prompting for the name, and rewriting the tables."""
+import sys
 import tomllib
+from types import SimpleNamespace
 
 import pytest
 
 from ticket_sorter.config import (
     load_aliases,
     load_duplicates,
+    load_flags,
     load_name,
-    load_upload_flags,
     save_tables,
 )
+
+
+@pytest.fixture
+def terminal(monkeypatch):
+    """A run with a terminal to prompt on, which pytest's captured stdin is not."""
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
 
 
 @pytest.fixture
@@ -19,7 +27,7 @@ def config_path(tmp_path):
 
 
 def test_missing_file_reads_as_empty(config_path):
-    assert load_upload_flags(config_path) == {"upload_drive": False, "create_calendar": False}
+    assert load_flags(config_path) == {"upload_drive": False, "create_calendar": False, "input_drive": False}
     assert load_aliases(config_path) == {}
     assert load_duplicates(config_path) == {}
 
@@ -29,6 +37,7 @@ def test_reads_flags_and_tables_off_a_real_file(config_path):
         'name = "Octopus 2026 Tickets"\n'
         "upload_drive = true\n"
         "create_calendar = false\n"
+        "input_drive = true\n"
         "\n"
         "[aliases]\n"
         '"Ania" = "Anna Nowak"\n'
@@ -37,7 +46,7 @@ def test_reads_flags_and_tables_off_a_real_file(config_path):
         '"ABC123" = "Motor City"\n',
         encoding="utf-8",
     )
-    assert load_upload_flags(config_path) == {"upload_drive": True, "create_calendar": False}
+    assert load_flags(config_path) == {"upload_drive": True, "create_calendar": False, "input_drive": True}
     assert load_aliases(config_path) == {"Ania": "Anna Nowak"}
     assert load_duplicates(config_path) == {"ABC123": "Motor City"}
 
@@ -48,7 +57,13 @@ def test_load_name_returns_the_stored_name_without_prompting(config_path, monkey
     assert load_name(config_path) == "Octopus 2026 Tickets"
 
 
-def test_load_name_prompts_until_answered_and_prepends(config_path, monkeypatch):
+def test_load_name_without_a_terminal_to_ask_on_says_so(config_path):
+    # what a GitHub Actions run hits if it neither passes --name nor has a config to read
+    with pytest.raises(RuntimeError, match="no terminal"):
+        load_name(config_path)
+
+
+def test_load_name_prompts_until_answered_and_prepends(config_path, terminal, monkeypatch):
     config_path.write_text(
         'upload_drive = true\n\n[aliases]\n"Ania" = "Anna Nowak"\n', encoding="utf-8"
     )
@@ -66,7 +81,7 @@ def test_load_name_prompts_until_answered_and_prepends(config_path, monkeypatch)
     }
 
 
-def test_load_name_creates_a_missing_file(config_path, monkeypatch):
+def test_load_name_creates_a_missing_file(config_path, terminal, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _prompt: "Octopus 2026 Tickets")
     assert load_name(config_path) == "Octopus 2026 Tickets"
     assert tomllib.loads(config_path.read_text(encoding="utf-8")) == {"name": "Octopus 2026 Tickets"}

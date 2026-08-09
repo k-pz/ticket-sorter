@@ -1,0 +1,53 @@
+name: Sort tickets
+
+# Everything this run reads and writes lives in Google Drive: the ticket PDFs come out of the
+# "unsorted" folder inside the folder being sorted into, and config.toml — the merged names and
+# the duplicate marks — is kept beside them, since the runner is thrown away afterwards.
+#
+# Two settings, both under Settings -> Secrets and variables -> Actions:
+#   TICKET_SORTER_TOKEN (secret)   the contents of a token.json from a local run
+#   TICKET_SORTER_NAME  (variable) the name of the Drive folder, Sheet and calendars
+# See "Running it from GitHub Actions" in README.md.
+
+on:
+  workflow_dispatch:
+  # Uncomment to sort on a schedule as well, here every hour on the hour. Re-sorting the same
+  # tickets is a no-op beyond the reads: every step of the upload syncs rather than rebuilds.
+  # schedule:
+  #   - cron: "0 * * * *"
+
+permissions: {}
+
+# Two runs sorting one Drive folder at once would each trash what the other had just uploaded.
+concurrency:
+  group: sort-tickets
+  cancel-in-progress: false
+
+jobs:
+  sort:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TICKET_SORTER_TOKEN: ${{ secrets.TICKET_SORTER_TOKEN }}
+      NAME: ${{ vars.TICKET_SORTER_NAME }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # Said here rather than left to fail deeper in, where an empty name reads as no name.
+      - name: Check the settings are there
+        run: |
+          [ -n "$NAME" ] || { echo "::error::Set the TICKET_SORTER_NAME repository variable to the name of the Drive folder."; exit 1; }
+          [ -n "$TICKET_SORTER_TOKEN" ] || { echo "::error::Set the TICKET_SORTER_TOKEN repository secret to the contents of a local token.json."; exit 1; }
+
+      - name: Sort
+        run: >
+          uv run ticket-sorter
+          --name "$NAME"
+          --input-drive
+          --config-drive
+          --upload-drive
+          --create-calendar

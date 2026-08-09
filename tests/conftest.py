@@ -149,9 +149,13 @@ def make_ticket():
 
 
 def _response(item):
-    """A response for HttpMockSequence: a body on its own is a 200, or pass (status, body)."""
+    """A response for HttpMockSequence: a body on its own is a 200, or pass (status, body).
+
+    Text and bytes go as they are — that's a downloaded file, or a body too malformed to be
+    JSON — and anything else is serialized, which is what an API response usually is.
+    """
     status, body = item if isinstance(item, tuple) else (200, item)
-    return {"status": str(status)}, body if isinstance(body, str) else json.dumps(body)
+    return {"status": str(status)}, body if isinstance(body, str | bytes) else json.dumps(body)
 
 
 @pytest.fixture
