@@ -94,6 +94,13 @@ of them gets left out for sharing a name with another. The sorting reads names
 and codes out of the PDFs rather than off them, so what a file is called, and
 which folder it sits in, makes no difference to where its ticket ends up.
 
+One exception, so that copying files around doesn't double the output: a PDF
+with the same name *and* byte for byte the same contents as one already read is
+that same download a second time, and is skipped with a note. Both have to
+match. Two files under one name holding different tickets are two tickets, and
+two files holding the same bytes under different names have been told apart by
+hand already, so both of those pairs are read in full.
+
 A **duplicate** is a second ticket for a showing one person is already going
 to — same person, film, time and venue. The first ticket is the one that
 counts; the rest go to `duplicates/`. (You can also mark a ticket as one by
@@ -526,6 +533,10 @@ Notes:
   to all arrive called `bilety.pdf`; the second one downloaded becomes
   `bilety-2.pdf` locally. It makes no difference to the sorting, which reads
   names out of the PDFs rather than off them.
+- One of them that shares both its name and its contents with a file already
+  listed is the same drop twice over, and is skipped without being downloaded
+  at all — Drive's own checksum for the file says so. As with `input/`, a
+  shared name on its own doesn't count, and neither do shared contents.
 - Anything in `unsorted` that isn't a PDF is skipped with a note, the same way
   a stray file in `input/` is.
 - **This is what makes the whole-Drive scope necessary.** That folder and the

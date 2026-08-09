@@ -8,6 +8,7 @@ the Drive and Calendar flags off so nothing network-shaped is reached — bar th
 import csv
 import importlib
 import io
+import shutil
 import sys
 import tomllib
 from datetime import datetime
@@ -45,17 +46,48 @@ def test_free_path_steps_around_what_is_already_there(tmp_path):
     assert m.free_path(tmp_path, "bilety.pdf") == tmp_path / "bilety-3.pdf"
 
 
+def written(directory, **files):
+    """Files under `directory`, given as `relative/path` (with `/` as `__`) to contents."""
+    for path, contents in files.items():
+        written_path = directory / path.replace("__", "/")
+        written_path.parent.mkdir(parents=True, exist_ok=True)
+        written_path.write_bytes(contents)
+    return directory
+
+
 def test_input_pdfs_finds_the_ones_kept_in_subfolders(tmp_path):
     """A directory holds one `bilety.pdf`, so several tickets means several folders."""
-    for path in ("bilety.pdf", "first/bilety.pdf", "first/second/bilety.pdf", "notes.txt"):
-        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / path).touch()
+    written(
+        tmp_path,
+        **{"bilety.pdf": b"one", "first__bilety.pdf": b"two",
+           "first__second__bilety.pdf": b"three", "notes.txt": b"not a PDF"},
+    )
     (tmp_path / "empty.pdf").mkdir()  # a directory that happens to be named like a PDF
 
     assert m.input_pdfs(tmp_path) == [
         tmp_path / "bilety.pdf", tmp_path / "first" / "bilety.pdf",
         tmp_path / "first" / "second" / "bilety.pdf",
     ]
+
+
+def test_input_pdfs_reads_a_copy_of_one_it_has_only_once(tmp_path, capsys):
+    """The same name and the same bytes is one download dropped in twice; the first of
+    them in path order is the one read, so which it is doesn't move between runs."""
+    written(tmp_path, **{"bilety.pdf": b"one", "spare__bilety.pdf": b"one"})
+
+    assert m.input_pdfs(tmp_path) == [tmp_path / "bilety.pdf"]
+    assert "skip (a copy of one already read): spare/bilety.pdf" in capsys.readouterr().err
+
+
+def test_input_pdfs_keeps_a_shared_name_over_different_contents(tmp_path):
+    written(tmp_path, **{"bilety.pdf": b"one", "second__bilety.pdf": b"another ticket"})
+    assert len(m.input_pdfs(tmp_path)) == 2
+
+
+def test_input_pdfs_keeps_the_same_contents_under_different_names(tmp_path):
+    """Told apart by hand is told apart: only a shared name and shared bytes is a copy."""
+    written(tmp_path, **{"bilety.pdf": b"one", "bilety-2.pdf": b"one"})
+    assert len(m.input_pdfs(tmp_path)) == 2
 
 
 # --- parse_ticket ------------------------------------------------------------------
@@ -399,6 +431,22 @@ def test_main_copies_every_ticket_whose_name_is_taken(sorter, make_pdf):
     assert names_in(sorter.input) == [
         "motor-city-ABC123-2.pdf", "motor-city-ABC123.pdf", "motor-city-ABC123__anna-nowak.pdf"
     ]
+
+
+def test_main_does_not_sort_one_ticket_twice_over_a_copy_of_its_file(sorter, make_pdf, capsys):
+    """The same file under the same name in two folders is one download that got copied
+    about, not a second ticket — sorting it again would file it as a duplicate of itself."""
+    source = make_pdf("bilety.pdf", into=sorter.input / "downloaded")
+    (sorter.input / "spare").mkdir()
+    shutil.copy2(source, sorter.input / "spare" / "bilety.pdf")
+    sorter.run()
+
+    assert names_in(sorter.output / "tickets" / "anna-nowak") == [
+        "motor-city-ABC123__anna-nowak.pdf"
+    ]
+    assert names_in(sorter.output / "duplicates") == []
+    assert len(read_csv(sorter.output / "duplicates.csv")) == 1  # the header, and no row under it
+    assert "skip (a copy of one already read): spare/bilety.pdf" in capsys.readouterr().err
 
 
 def test_main_reads_the_pdfs_in_subfolders_of_the_input(sorter, make_pdf):

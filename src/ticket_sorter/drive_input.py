@@ -51,18 +51,30 @@ def download_unsorted(name: str, dest_dir: Path, credentials_path: Path, token_p
     listed = execute(
         drive.files().list(
             q=f"'{folder_id}' in parents and trashed = false",
-            fields="files(id,name,mimeType)",
+            # md5Checksum is Drive's own hash of what a file holds, so a copy of a file
+            # already listed can be told for one without being downloaded first.
+            fields="files(id,name,mimeType,md5Checksum)",
             orderBy="name",
             pageSize=1000,
         ),
         "unsorted listing",
     ).get("files", [])
-    pdfs = []
+    pdfs, seen = [], set()
     for entry in listed:
-        if entry["mimeType"] == PDF_MIME:
-            pdfs.append(entry)
-        else:
+        if entry["mimeType"] != PDF_MIME:
             print(f"skip (not a PDF): {entry['name']}", file=sys.stderr)
+            continue
+        # Same name, same contents: one download dropped in twice, not two tickets. Sorting
+        # it again would file the second copy as a duplicate of the first, so it isn't
+        # downloaded at all. This is the only place that can tell — the copies land under
+        # names of their own locally, which is exactly what the scan there goes by — so a
+        # file Drive gave no checksum for stays a file of its own rather than a guess.
+        checksum = entry.get("md5Checksum")
+        if checksum and (entry["name"], checksum) in seen:
+            print(f"skip (a copy of one already listed): {entry['name']}", file=sys.stderr)
+            continue
+        seen.add((entry["name"], checksum))
+        pdfs.append(entry)
     # Sorting nothing is not a no-op: it would empty the Drive folder, the Sheet and the
     # calendars of everything an earlier run put there, which is a lot to lose to a folder
     # someone renamed. Sorting no tickets on purpose is what deleting the folder is for.
