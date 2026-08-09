@@ -1,0 +1,62 @@
+name: Sort tickets
+
+# Everything this run reads and writes lives in Google Drive: the ticket PDFs come out of the
+# "unsorted" folder inside the folder being sorted into, and config.toml — the merged names and
+# the duplicate marks — is kept beside them, since the runner is thrown away afterwards.
+#
+# Settings, all under Settings -> Secrets and variables -> Actions:
+#   TICKET_SORTER_CLIENT_ID     (secret)   the Cloud project's OAuth client, as its two halves
+#   TICKET_SORTER_CLIENT_SECRET (secret)
+#   TICKET_SORTER_REFRESH_TOKEN (secret)   a refresh token issued to that client
+#   TICKET_SORTER_NAME          (variable) the name of the Drive folder, Sheet and calendars
+#
+# The whole credentials.json in TICKET_SORTER_OAUTH_CLIENT works in place of the id and secret,
+# and a whole token.json in TICKET_SORTER_TOKEN in place of all three. See "Running it from
+# GitHub Actions" in README.md, which walks through getting a refresh token from a phone.
+
+on:
+  workflow_dispatch:
+  # Uncomment to sort on a schedule as well, here every hour on the hour. Re-sorting the same
+  # tickets is a no-op beyond the reads: every step of the upload syncs rather than rebuilds.
+  # schedule:
+  #   - cron: "0 * * * *"
+
+permissions: {}
+
+# Two runs sorting one Drive folder at once would each trash what the other had just uploaded.
+concurrency:
+  group: sort-tickets
+  cancel-in-progress: false
+
+jobs:
+  sort:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TICKET_SORTER_NAME: ${{ vars.TICKET_SORTER_NAME }}
+      TICKET_SORTER_CLIENT_ID: ${{ secrets.TICKET_SORTER_CLIENT_ID }}
+      TICKET_SORTER_CLIENT_SECRET: ${{ secrets.TICKET_SORTER_CLIENT_SECRET }}
+      TICKET_SORTER_REFRESH_TOKEN: ${{ secrets.TICKET_SORTER_REFRESH_TOKEN }}
+      TICKET_SORTER_OAUTH_CLIENT: ${{ secrets.TICKET_SORTER_OAUTH_CLIENT }}
+      TICKET_SORTER_TOKEN: ${{ secrets.TICKET_SORTER_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # As annotations on the run, which is what you get to read on a phone. What's missing
+      # from the credentials themselves the run says for itself, in as much detail.
+      - name: Check the settings are there
+        run: |
+          missing() { echo "::error::$1"; exit 1; }
+          [ -n "$TICKET_SORTER_NAME" ] ||
+            missing "Set the TICKET_SORTER_NAME variable to the name of the Drive folder."
+          [ -n "$TICKET_SORTER_REFRESH_TOKEN$TICKET_SORTER_TOKEN" ] ||
+            missing "Set TICKET_SORTER_REFRESH_TOKEN, with the client it belongs to. See README.md."
+
+      # The name and the config it uses come from the environment above; what's left is what
+      # this run is for.
+      - name: Sort
+        run: uv run ticket-sorter --input-drive --config-drive --upload-drive --create-calendar

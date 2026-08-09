@@ -1,5 +1,6 @@
 """Upload sorted tickets to Google Drive and build a Sheet with linked tables."""
 import json
+import os
 import random
 import sys
 import time
@@ -13,6 +14,7 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaFileUpload
 
 from .colors import showing_colors, showing_key
+from .config import CLIENT_ENV, CLIENT_ID_ENV, CLIENT_SECRET_ENV, REFRESH_ENV, TOKEN_ENV
 from .main import slugify
 
 MAX_ATTEMPTS = 7  # ~1+2+4+8+16+32s of waiting before giving up
@@ -26,6 +28,17 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar",
 ]
 
+# Google's own endpoints, for a client given as an id and a secret rather than as the JSON
+# those normally arrive wrapped in. Also the fallback for a JSON that leaves them out.
+AUTH_URI = "https://accounts.google.com/o/oauth2/auth"
+TOKEN_URI = "https://oauth2.googleapis.com/token"
+
+UNSORTED = "unsorted"    # the folder in the Drive folder that --input-drive reads from
+CONFIG_NAME = "config.toml"  # and the config a --config-drive run keeps beside it
+# Left alone by the sync that trashes whatever a run didn't put in the Drive folder: neither
+# is this run's output, and the drop folder in particular holds the only copy of its files.
+KEPT_IN_ROOT = {UNSORTED, CONFIG_NAME}
+
 # "duplicate" is a checkbox sitting right before the film, for handing a showing back
 # from the Sheet the way the DUPLICATE prefix does from a calendar.
 HEADER = [
@@ -37,6 +50,11 @@ CODE_COL = HEADER.index("reservation_code")
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
+
+# Drive lets a folder hold several files under one name, and orders a listing however it
+# likes unless told. Both the lookup and the sync ask for newest first, so the one a run
+# adopts is the one written last, and the ones it trashes are the older copies of it.
+NEWEST_FIRST = "modifiedTime desc"
 
 
 def _reason(error: HttpError) -> str:
@@ -80,31 +98,138 @@ def execute(request, what: str = "request"):
             time.sleep(delay)
 
 
-def get_credentials(credentials_path: Path, token_path: Path) -> Credentials:
-    creds = None
+def _env_json(name: str, what: str) -> dict | None:
+    """What an environment variable holding a file's contents parses to, if it's set. Said
+    plainly rather than as a JSON traceback: what's in it was pasted into a secret."""
+    raw = os.environ.get(name)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except ValueError as error:
+        raise RuntimeError(f"${name} is set, but isn't {what}: {error}") from error
+
+
+def _oauth_client() -> dict | None:
+    """The Cloud project's OAuth client, if the environment carries one, in either of the two
+    shapes it comes in: the whole JSON the Credentials page hands you, "installed" wrapper and
+    all, or the client id and secret on their own. The second is for setting this up from a
+    phone, where those two have copy buttons next to them and the JSON is a file download."""
+    client = _env_json(CLIENT_ENV, "an OAuth client's JSON")
+    if client:
+        if not (client.get("installed") or client.get("web")):
+            raise RuntimeError(
+                f"${CLIENT_ENV} is set, but holds JSON with no 'installed' or 'web' section: pass the "
+                "whole file downloaded from the Cloud project's Credentials page, not a part of it."
+            )
+        return client
+
+    client_id, client_secret = os.environ.get(CLIENT_ID_ENV), os.environ.get(CLIENT_SECRET_ENV)
+    if client_id and client_secret:
+        return {"installed": {
+            "client_id": client_id, "client_secret": client_secret,
+            "auth_uri": AUTH_URI, "token_uri": TOKEN_URI,
+        }}
+    if client_id or client_secret:
+        raise RuntimeError(f"${CLIENT_ID_ENV} and ${CLIENT_SECRET_ENV} only work as a pair; one of them is unset.")
+    return None
+
+
+def _from_refresh_token(client: dict, refresh_token: str) -> Credentials:
+    """Credentials built from the Cloud project's OAuth client and a refresh token issued to
+    it. That pair is what a token.json is made of, minus the expired access token it also
+    carries, so a run holding it can mint a live token of its own."""
+    details = client.get("installed") or client["web"]
+    return Credentials(
+        None,
+        refresh_token=refresh_token,
+        token_uri=details.get("token_uri", TOKEN_URI),
+        client_id=details["client_id"],
+        client_secret=details["client_secret"],
+        scopes=SCOPES,
+    )
+
+
+def _stored_credentials(token_path: Path) -> tuple[Credentials | None, bool]:
+    """What a run has to go on before it talks to Google, and whether it came from the
+    environment. Three ways in, in the order they're preferred: a whole token.json in
+    $TICKET_SORTER_TOKEN; the OAuth client and a refresh token for it, as two variables of
+    their own; and the token file a local run leaves behind."""
+    token = _env_json(TOKEN_ENV, "a token file's contents")
+    if token:
+        try:
+            return Credentials.from_authorized_user_info(token, SCOPES), True
+        except ValueError as error:
+            raise RuntimeError(f"${TOKEN_ENV} is set, but isn't a token file's contents: {error}") from error
+
+    client, refresh_token = _oauth_client(), os.environ.get(REFRESH_ENV)
+    if client and refresh_token:
+        return _from_refresh_token(client, refresh_token), True
+
     if token_path.exists():
-        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            print("Refreshing Google auth token...")
-            creds.refresh(Request())
-        else:
-            if not credentials_path.exists():
-                raise FileNotFoundError(
-                    f"{credentials_path} not found. Create a Google Cloud OAuth Desktop client "
-                    "and save it there (see README.md)."
-                )
-            print("Opening browser to authorize with Google...")
-            flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
-            creds = flow.run_local_server(port=0)
+        return Credentials.from_authorized_user_file(str(token_path), SCOPES), False
+    return None, False
+
+
+def _authorize(credentials_path: Path) -> Credentials:
+    """Ask Google for a token from scratch, which means opening a browser. A run with no
+    terminal has nobody to open one for, so it says what to set instead of hanging on a
+    browser that is never coming back."""
+    client = _oauth_client()
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            "No usable Google token, and no way to ask for one: authorizing opens a browser and "
+            f"this run has no terminal. Set ${REFRESH_ENV} to a refresh token, along with the "
+            f"OAuth client it was issued to — as ${CLIENT_ID_ENV} and ${CLIENT_SECRET_ENV}, or "
+            f"as ${CLIENT_ENV}. A whole token file in ${TOKEN_ENV} does instead (see README.md)."
+        )
+    if not client and not credentials_path.exists():
+        raise FileNotFoundError(
+            f"{credentials_path} not found. Create a Google Cloud OAuth Desktop client "
+            "and save it there (see README.md)."
+        )
+    print("Opening browser to authorize with Google...")
+    flow = (
+        InstalledAppFlow.from_client_config(client, SCOPES) if client
+        else InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
+    )
+    return flow.run_local_server(port=0)
+
+
+def get_credentials(credentials_path: Path, token_path: Path) -> Credentials:
+    """The Google account a run acts as. Credentials from the environment come ahead of the
+    token file and are never written back to: the refresh they need lasts the run, and a run
+    given its credentials as secrets has nowhere of its own to keep one."""
+    creds, from_env = _stored_credentials(token_path)
+    if creds and creds.valid:
+        return creds
+    if creds and creds.refresh_token:
+        # Also the way in for a refresh token passed on its own: it arrives with no access
+        # token at all rather than an expired one, and redeeming it is what makes it usable.
+        print("Refreshing Google auth token...")
+        creds.refresh(Request())
+    else:
+        creds = _authorize(credentials_path)
+    if not from_env:
         token_path.write_text(creds.to_json())
     return creds
 
 
-def _find(drive, name: str, mime_type: str, parent_id: str | None) -> str | None:
-    q = f"name = '{name}' and mimeType = '{mime_type}' and trashed = false and '{parent_id or 'root'}' in parents"
-    files = execute(drive.files().list(q=q, fields="files(id)", pageSize=1), "folder lookup").get("files", [])
-    return files[0]["id"] if files else None
+def find_child(drive, name: str, mime_type: str | None, parent_id: str | None) -> str | None:
+    """The id of what's named `name` inside parent_id (or the Drive root), if anything is.
+    The newest of them, if several are: a Drive folder can hold any number of files sharing a
+    name, and which of those a run picks up decides what it treats as current — so it has to
+    be the last one written rather than whichever Drive happened to list first."""
+    # Escaped, not interpolated raw: a name is whatever the config says, and an apostrophe in
+    # it would otherwise end the quoted string and leave Drive with a query it can't parse.
+    quoted = name.replace("\\", "\\\\").replace("'", "\\'")
+    q = f"name = '{quoted}' and trashed = false and '{parent_id or 'root'}' in parents"
+    if mime_type:
+        q += f" and mimeType = '{mime_type}'"
+    listed = execute(
+        drive.files().list(q=q, fields="files(id)", orderBy=NEWEST_FIRST, pageSize=1), "lookup"
+    ).get("files", [])
+    return listed[0]["id"] if listed else None
 
 
 def _create_folder(drive, name: str, parent_id: str | None = None) -> str:
@@ -115,17 +240,19 @@ def _create_folder(drive, name: str, parent_id: str | None = None) -> str:
 
 
 def _find_or_create_folder(drive, name: str, parent_id: str | None = None) -> str:
-    return _find(drive, name, FOLDER_MIME, parent_id) or _create_folder(drive, name, parent_id)
+    return find_child(drive, name, FOLDER_MIME, parent_id) or _create_folder(drive, name, parent_id)
 
 
 def _sync(drive, folder_id: str, wanted: set[str]) -> dict[str, dict]:
-    """Trash whatever in folder_id isn't named in wanted; return the survivors by name."""
+    """Trash whatever in folder_id isn't named in wanted; return the survivors by name.
+    Newest first, so that of several files sharing a name the survivor is the last one
+    written — the same one find_child would have looked up."""
     q = f"'{folder_id}' in parents and trashed = false"
     keep: dict[str, dict] = {}
     # permissions comes along for the ride, so checking what's already link-shared
     # costs no request of its own.
     fields = "files(id,name,mimeType,webViewLink,permissions(type,role))"
-    files = execute(drive.files().list(q=q, fields=fields, pageSize=1000), "folder listing")
+    files = execute(drive.files().list(q=q, fields=fields, orderBy=NEWEST_FIRST, pageSize=1000), "folder listing")
     for f in files.get("files", []):
         if f["name"] in wanted and f["name"] not in keep:
             keep[f["name"]] = f
@@ -167,6 +294,17 @@ def _upload_file(drive, path: Path, parent_id: str) -> str:
     return file["webViewLink"]
 
 
+def _replace_file(drive, existing: dict, parent_id: str, name: str, path: Path, mime_type: str) -> None:
+    """Put `path` in the folder under `name`, over whatever is already there under it. Unlike
+    the ticket PDFs these are rewritten every run, since their contents change every run."""
+    media = MediaFileUpload(str(path), mimetype=mime_type)
+    found = existing.get(name)
+    if found:
+        execute(drive.files().update(fileId=found["id"], media_body=media), f"{name} upload")
+    else:
+        execute(drive.files().create(body={"name": name, "parents": [parent_id]}, media_body=media), f"{name} upload")
+
+
 def _share_sheet(drive, file_id: str) -> bool:
     """Let anyone with the Sheet's link edit it, and say whether that had to be changed.
     Drive, unlike Calendar, does allow write access on an anyone-with-the-link share.
@@ -206,8 +344,8 @@ def read_sheet_marks(name: str, credentials_path: Path, token_path: Path) -> tup
     drive = build("drive", "v3", credentials=creds)
     sheets = build("sheets", "v4", credentials=creds)
 
-    root_id = _find(drive, name, FOLDER_MIME, None)
-    sheet_id = _find(drive, name, SHEET_MIME, root_id) if root_id else None
+    root_id = find_child(drive, name, FOLDER_MIME, None)
+    sheet_id = find_child(drive, name, SHEET_MIME, root_id) if root_id else None
     if not sheet_id:
         return set(), set()
 
@@ -303,7 +441,8 @@ def _write_table(sheets, spreadsheet_id: str, sheet_id: int, title: str, rows: l
 
 
 def upload_to_drive(
-    rows: list, duplicate_rows: list, output_dir: Path, name: str, credentials_path: Path, token_path: Path
+    rows: list, duplicate_rows: list, output_dir: Path, name: str, credentials_path: Path, token_path: Path,
+    config_path: Path | None = None,
 ) -> tuple[str, str]:
     creds = get_credentials(credentials_path, token_path)
     drive = build("drive", "v3", credentials=creds)
@@ -312,7 +451,7 @@ def upload_to_drive(
     root_id = _find_or_create_folder(drive, name)
 
     print(f"Syncing '{name}'...")
-    root = _sync(drive, root_id, {"tickets", "duplicates", "tickets.csv", "duplicates.csv", name})
+    root = _sync(drive, root_id, {"tickets", "duplicates", "tickets.csv", "duplicates.csv", name} | KEPT_IN_ROOT)
     sheet = root.get(name)
     sheet_id_existing = sheet["id"] if sheet and sheet["mimeType"] == SHEET_MIME else None
 
@@ -356,14 +495,14 @@ def upload_to_drive(
     for csv_name in ("tickets.csv", "duplicates.csv"):
         csv_path = output_dir / csv_name
         if csv_path.exists():
-            # Always re-uploaded, unlike the PDFs: same name, but the contents change every run.
             print(f"Uploading {csv_name}...")
-            media = MediaFileUpload(str(csv_path), mimetype="text/csv")
-            found = root.get(csv_name)
-            if found:
-                execute(drive.files().update(fileId=found["id"], media_body=media), "csv upload")
-            else:
-                execute(drive.files().create(body={"name": csv_name, "parents": [root_id]}, media_body=media), "csv upload")
+            _replace_file(drive, root, root_id, csv_name, csv_path, "text/csv")
+
+    # Kept next to them so the next run — on a machine that has none of this, in the usual
+    # case — starts from the aliases and duplicate marks this one ends with.
+    if config_path and config_path.exists():
+        print(f"Uploading {CONFIG_NAME}...")
+        _replace_file(drive, root, root_id, CONFIG_NAME, config_path, "text/plain")
 
     if sheet_id_existing:
         print(f"Reusing spreadsheet '{name}'...")

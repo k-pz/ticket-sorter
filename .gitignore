@@ -15,6 +15,9 @@ wheels/
 # Real ticket PDFs (names + reservation codes)
 /input/
 
+# What --input-drive downloads (wiped and rebuilt on each run)
+/unsorted/
+
 # Google OAuth secrets (never commit)
 /credentials.json
 /token.json

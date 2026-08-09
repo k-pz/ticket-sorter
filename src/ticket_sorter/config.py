@@ -1,9 +1,27 @@
-"""Loads config.toml, prompting for and creating it on first use."""
+"""Loads config.toml, prompting for and creating it on first use, and names the settings a
+run can take from its environment instead."""
 import re
+import sys
 import tomllib
 from pathlib import Path
 
 TABLE_HEADER = re.compile(r"^\[(?:aliases|duplicates)\]", re.M)
+
+# Flags that can be set in config.toml as well as on the command line. --config-drive is
+# deliberately not among them: it decides which config.toml a run reads, so by the time
+# this file is read it has already had its say.
+FLAGS = ("upload_drive", "create_calendar", "input_drive")
+
+# Everything a run can be told through its environment, which is how a run with no files of
+# its own — a GitHub Actions one — is set up. The first two are the values their flags take;
+# the rest are the contents of files, so that a secret never has to be written to disk.
+CONFIG_ENV = "TICKET_SORTER_CONFIG"          # where config.toml is, as --config
+NAME_ENV = "TICKET_SORTER_NAME"              # the Drive folder/Sheet/Calendar name, as --name
+TOKEN_ENV = "TICKET_SORTER_TOKEN"            # a whole token.json
+CLIENT_ENV = "TICKET_SORTER_OAUTH_CLIENT"    # the Cloud project's OAuth client, i.e. credentials.json
+CLIENT_ID_ENV = "TICKET_SORTER_CLIENT_ID"        # or that client as its two halves, which is
+CLIENT_SECRET_ENV = "TICKET_SORTER_CLIENT_SECRET"  # what the Cloud console has copy buttons for
+REFRESH_ENV = "TICKET_SORTER_REFRESH_TOKEN"  # a refresh token issued to that client
 
 
 def _load(config_path: Path) -> dict:
@@ -23,6 +41,11 @@ def load_name(config_path: Path) -> str:
     if "name" in config:
         return config["name"]
 
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            f"No name for the Google Drive folder, Sheet and Calendar: {config_path} holds none, "
+            "no --name was given, and this run has no terminal to ask on."
+        )
     name = input("Name to use for the Google Drive folder, Sheet, and Calendar: ").strip()
     while not name:
         name = input("Name can't be empty, try again: ").strip()
@@ -34,13 +57,11 @@ def load_name(config_path: Path) -> str:
     return name
 
 
-def load_upload_flags(config_path: Path) -> dict:
-    """Optional `upload_drive` / `create_calendar` booleans, used as defaults for the matching CLI flags."""
+def load_flags(config_path: Path) -> dict:
+    """The optional `upload_drive` / `create_calendar` / `input_drive` booleans, used as
+    defaults for the matching CLI flags."""
     config = _load(config_path)
-    return {
-        "upload_drive": config.get("upload_drive", False),
-        "create_calendar": config.get("create_calendar", False),
-    }
+    return {flag: config.get(flag, False) for flag in FLAGS}
 
 
 def load_aliases(config_path: Path) -> dict[str, str]:

@@ -2,6 +2,7 @@
 """Rename biletomat.pl ticket PDFs and export their metadata to a CSV."""
 import argparse
 import csv
+import os
 import re
 import shutil
 import sys
@@ -12,11 +13,12 @@ from pathlib import Path
 
 import pypdf
 
-from .config import load_aliases, load_duplicates, load_name, load_upload_flags, save_tables
+from .config import CONFIG_ENV, NAME_ENV, load_aliases, load_duplicates, load_flags, load_name, save_tables
 from .names import look_alikes, merge_names, resolve
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 INPUT_DIR = ROOT_DIR / "input"
+UNSORTED_DIR = ROOT_DIR / "unsorted"  # where --input-drive puts what it downloads
 OUTPUT_DIR = ROOT_DIR / "output"
 TICKETS_DIR = OUTPUT_DIR / "tickets"
 DUPLICATES_DIR = OUTPUT_DIR / "duplicates"
@@ -174,6 +176,15 @@ def write_csv(csv_path: Path, rows: list) -> None:
             ])
 
 
+def resolve_name(args) -> str:
+    """The name the Drive folder, Sheet and Calendars share. Resolved once and kept on args:
+    --config-drive replaces the config file mid-run with the copy from Drive, and the name
+    that found that copy has to outlive being replaced."""
+    if not args.name:
+        args.name = load_name(args.config)
+    return args.name
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -181,8 +192,24 @@ def parse_args():
         help="upload output to Google Drive and build a linked Sheet (also settable as upload_drive in config.toml)",
     )
     parser.add_argument(
+        "--input-drive", action="store_true",
+        help="read the input PDFs from the 'unsorted' folder inside the Drive folder rather than from input/ "
+             "(also settable as input_drive in config.toml)",
+    )
+    parser.add_argument(
+        "--config-drive", action="store_true",
+        help="keep config.toml in the Drive folder: read it from there before the run, and write it back as part "
+             "of the upload (requires --upload-drive; a CLI flag only, since it picks the config to read)",
+    )
+    parser.add_argument(
+        "--name", default=os.environ.get(NAME_ENV),
+        help=f"name for the Drive folder, Sheet and Calendars, instead of the one in config.toml "
+             f"(also settable as ${NAME_ENV})",
+    )
+    parser.add_argument(
         "--rename-input", action="store_true",
-        help="rename each PDF in input/ in place to what it would be named as a ticket PDF",
+        help="rename each input PDF in place to what it would be named as a ticket PDF "
+             "(in input/, or in the Drive folder it came from with --input-drive)",
     )
     parser.add_argument(
         "--merge-names", action="store_true",
@@ -198,25 +225,70 @@ def parse_args():
     parser.add_argument("--credentials", type=Path, default=ROOT_DIR / "credentials.json", help="OAuth client secrets file")
     parser.add_argument("--token", type=Path, default=ROOT_DIR / "token.json", help="cached OAuth token file")
     parser.add_argument(
-        "--config", type=Path, default=ROOT_DIR / "config.toml",
-        help="config file holding the Drive folder/Sheet/Calendar name and upload flags (created interactively if missing)",
+        "--config", type=Path, default=Path(os.environ.get(CONFIG_ENV) or ROOT_DIR / "config.toml"),
+        help=f"config file holding the Drive folder/Sheet/Calendar name and upload flags, created interactively "
+             f"if missing (also settable as ${CONFIG_ENV})",
     )
     args = parser.parse_args()
 
-    flags = load_upload_flags(args.config)
+    # Before the flags are read, so that a run driven from Drive takes its flags, aliases and
+    # duplicate marks off the copy kept there rather than off whatever this machine holds.
+    if args.config_drive:
+        from .drive_input import download_config
+
+        download_config(resolve_name(args), args.config, args.credentials, args.token)
+
+    flags = load_flags(args.config)
     args.upload_drive = args.upload_drive or flags["upload_drive"]
     args.create_calendar = args.create_calendar or flags["create_calendar"]
+    args.input_drive = args.input_drive or flags["input_drive"]
 
     if args.create_calendar and not args.upload_drive:
         parser.error("--create-calendar requires --upload-drive (set either as a CLI flag or in config.toml)")
+    if args.config_drive and not args.upload_drive:
+        parser.error("--config-drive requires --upload-drive (the config is written back as part of the upload)")
     return args
+
+
+def rename_sources(renames: dict, drive_files: dict, credentials_path: Path, token_path: Path) -> None:
+    """Give every input PDF the name its ticket got. Input taken from Drive is renamed where
+    it actually lives, in the unsorted folder — the copies of it this run downloaded are
+    thrown away with the rest of the scratch directory."""
+    if drive_files:
+        from .drive_input import rename_unsorted
+
+        rename_unsorted(
+            {drive_files[source]["id"]: name for source, name in renames.items()
+             if source in drive_files and drive_files[source]["name"] != name},
+            credentials_path, token_path,
+        )
+        return
+    for source, name in renames.items():
+        renamed = source.with_name(name)
+        if renamed == source:
+            continue
+        if renamed.exists():
+            print(f"skip rename (target exists): {renamed.name}", file=sys.stderr)
+        else:
+            source.rename(renamed)
 
 
 def main():
     args = parse_args()
 
+    # Empty rather than None when nothing needs it: every reader of it is behind a flag that
+    # does. Resolved before anything is read, since with --input-drive it's what says where.
+    name = resolve_name(args) if args.upload_drive or args.input_drive else ""
+
+    input_dir, drive_files = INPUT_DIR, {}
+    if args.input_drive:
+        from .drive_input import download_unsorted
+
+        input_dir = UNSORTED_DIR
+        drive_files = download_unsorted(name, input_dir, args.credentials, args.token)
+
     tickets = []
-    for pdf in sorted(INPUT_DIR.glob("*.pdf")):
+    for pdf in sorted(input_dir.glob("*.pdf")):
         ticket = parse_ticket(pdf)
         if ticket is None:
             print(f"skip (unrecognized layout): {pdf.name}", file=sys.stderr)
@@ -243,9 +315,6 @@ def main():
     # checkbox. Both are read before their surface is rewritten, and remembered here so the
     # ticket stays a duplicate afterwards. Unticking on the Sheet is the way back, so it is
     # applied last.
-    # Empty rather than None when nothing is uploaded: every reader of it is behind the
-    # same flag (--create-calendar implies --upload-drive), so the empty case never lands.
-    name = load_name(args.config) if args.upload_drive else ""
     stored_duplicates = load_duplicates(args.config)
     marked = set(stored_duplicates)
     if args.create_calendar:
@@ -270,6 +339,7 @@ def main():
 
     rows, duplicate_rows = [], []
     seen_shows = set()
+    renames = {}  # source -> the name its ticket got, applied once every source has one
     for ticket in tickets:
         source = ticket["source"]
         # A "show" is one person's booking for one screening; any ticket beyond
@@ -296,15 +366,11 @@ def main():
             shutil.copy2(source, new_path)
         ticket["file"] = str(new_path.relative_to(OUTPUT_DIR))
 
-        if args.rename_input:
-            renamed = source.with_name(new_path.name)
-            if renamed != source:
-                if renamed.exists():
-                    print(f"skip rename (target exists): {renamed.name}", file=sys.stderr)
-                else:
-                    source.rename(renamed)
-
+        renames[source] = new_path.name
         (duplicate_rows if is_duplicate else rows).append(ticket)
+
+    if args.rename_input:
+        rename_sources(renames, drive_files, args.credentials, args.token)
 
     rows.sort(key=lambda t: t["start_time"])
     duplicate_rows.sort(key=lambda t: t["start_time"])
@@ -317,7 +383,10 @@ def main():
     if args.upload_drive:
         from .drive_upload import upload_to_drive
 
-        folder_url, sheet_url = upload_to_drive(rows, duplicate_rows, OUTPUT_DIR, name, args.credentials, args.token)
+        folder_url, sheet_url = upload_to_drive(
+            rows, duplicate_rows, OUTPUT_DIR, name, args.credentials, args.token,
+            config_path=args.config if args.config_drive else None,
+        )
         print(f"Drive folder: {folder_url}")
         print(f"Sheet: {sheet_url}")
 
