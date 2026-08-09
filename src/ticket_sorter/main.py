@@ -2,6 +2,7 @@
 """Rename biletomat.pl ticket PDFs and export their metadata to a CSV."""
 import argparse
 import csv
+import hashlib
 import os
 import re
 import shutil
@@ -144,16 +145,45 @@ def free_path(directory: Path, name: str) -> Path:
     return path
 
 
+def _digest(path: Path) -> bytes:
+    """What a file holds, as something short enough to compare against every other file."""
+    with path.open("rb") as f:
+        return hashlib.file_digest(f, "sha256").digest()
+
+
 def input_pdfs(directory: Path) -> list[Path]:
-    """Every PDF under `directory`, subfolders and all.
+    """Every PDF under `directory`, subfolders and all, bar the ones that are plain copies
+    of a PDF already found.
 
     Tickets arrive from biletomat.pl all called the same thing — `bilety.pdf` — and a
     directory can't hold two files under that one name. So a person with several of them
     has several folders, one per download, and a scan that read only the top level would
     sort whichever file happened to be moved out of its folder and silently drop the rest.
     Each of those is a ticket of its own, whatever it shares a name with.
+
+    Sharing a name and a byte for byte identical content is another matter: that is one
+    download that got copied about — into a backup folder, or twice out of the same mail
+    — and sorting it twice would put the same ticket in the output a second time as a
+    duplicate of itself. Only that pair counts as a copy. Two files that hold the same
+    bytes under different names have been told apart by hand and are left as two, and
+    a shared name alone says nothing at all when every ticket arrives under one name.
+
+    Of a set of copies it's the first in path order that's read, so which of them the run
+    sorts — and with --rename-input, which one gets renamed — is the same on every run.
     """
-    return sorted(path for path in directory.rglob("*.pdf") if path.is_file())
+    found: list[Path] = []
+    seen: set[tuple[str, bytes]] = set()
+    # Every file is hashed, rather than only the ones whose name turns out to repeat: a
+    # ticket PDF is a few tens of KB, and reading each of them once more costs less than
+    # the bookkeeping to work out which ones could be left unread.
+    for path in sorted(path for path in directory.rglob("*.pdf") if path.is_file()):
+        key = (path.name, _digest(path))
+        if key in seen:
+            print(f"skip (a copy of one already read): {path.relative_to(directory)}", file=sys.stderr)
+            continue
+        seen.add(key)
+        found.append(path)
+    return found
 
 
 def parse_ticket(path: Path):

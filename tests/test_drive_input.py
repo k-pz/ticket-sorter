@@ -13,8 +13,9 @@ CREDS = (Path("creds.json"), Path("token.json"))  # never opened: fake_google pa
 FOLDERS = [{"files": [{"id": "ROOT"}]}, {"files": [{"id": "DROP"}]}]  # the two lookups every read starts with
 
 
-def entry(name: str, file_id: str = "F1", mime: str = di.PDF_MIME) -> dict:
-    return {"id": file_id, "name": name, "mimeType": mime}
+def entry(name: str, file_id: str = "F1", mime: str = di.PDF_MIME, md5: str | None = None) -> dict:
+    listed = {"id": file_id, "name": name, "mimeType": mime}
+    return listed | {"md5Checksum": md5} if md5 else listed
 
 
 def file_ids(http) -> list[str]:
@@ -52,6 +53,48 @@ def test_download_unsorted(fake_google, tmp_path):
     assert (dest / "bilety-2.pdf").read_bytes() == b"%PDF-second"
     assert file_ids(http) == ["F1", "F2"]  # the third isn't a PDF, and isn't fetched
     assert all("alt=media" in uri for uri in uris(http)[3:])
+
+
+def test_download_unsorted_leaves_out_a_copy_of_a_file_already_listed(fake_google, tmp_path, capsys):
+    """Same name, same checksum: one download dropped in twice. The copy isn't fetched at
+    all — a second file under that name that holds something else still is."""
+    http = fake_google(di, [
+        *FOLDERS,
+        {"files": [
+            entry("bilety.pdf", "F1", md5="aaa"),
+            entry("bilety.pdf", "F2", md5="aaa"),   # the same file again
+            entry("bilety.pdf", "F3", md5="bbb"),   # a different ticket under the same name
+        ]},
+        "%PDF-first", "%PDF-third",
+    ])
+    downloaded = di.download_unsorted("Octopus", tmp_path / "unsorted", *CREDS)
+
+    assert file_ids(http) == ["F1", "F3"]
+    assert {path.name: f["id"] for path, f in downloaded.items()} == {"bilety.pdf": "F1", "bilety-2.pdf": "F3"}
+    assert "skip (a copy of one already listed): bilety.pdf" in capsys.readouterr().err
+
+
+def test_download_unsorted_keeps_a_file_drive_gave_no_checksum_for(fake_google, tmp_path):
+    """Nothing to compare is not the same as compared and found equal: both are downloaded,
+    since the copies land under names of their own once here and can't be told apart then."""
+    http = fake_google(di, [
+        *FOLDERS,
+        {"files": [entry("bilety.pdf", "F1"), entry("bilety.pdf", "F2")]},
+        "%PDF-first", "%PDF-second",
+    ])
+    di.download_unsorted("Octopus", tmp_path / "unsorted", *CREDS)
+    assert file_ids(http) == ["F1", "F2"]
+
+
+def test_download_unsorted_keeps_one_checksum_under_two_names(fake_google, tmp_path):
+    """Two names is two files told apart by hand, whatever they hold."""
+    http = fake_google(di, [
+        *FOLDERS,
+        {"files": [entry("bilety.pdf", "F1", md5="aaa"), entry("bilety-kino.pdf", "F2", md5="aaa")]},
+        "%PDF-first", "%PDF-second",
+    ])
+    di.download_unsorted("Octopus", tmp_path / "unsorted", *CREDS)
+    assert file_ids(http) == ["F1", "F2"]
 
 
 def test_download_unsorted_says_what_it_skipped(fake_google, tmp_path, capsys):
