@@ -53,7 +53,7 @@ git clone <this repo>
 cd ticket-sorter
 
 mkdir input                 # not in the repo: it holds real names and codes
-cp ~/Downloads/bilety*.pdf input/
+cp -R ~/Downloads/bilety* input/   # loose PDFs, folders of them, or both
 
 uv run ticket-sorter
 ```
@@ -87,10 +87,22 @@ output/
 └── duplicates.csv
 ```
 
+Every PDF under `input/` is read, subfolders included. Tickets download from
+biletomat.pl all called `bilety.pdf`, and a folder can only hold one file under
+that name — so keeping each download in a folder of its own is fine, and none
+of them gets left out for sharing a name with another. The sorting reads names
+and codes out of the PDFs rather than off them, so what a file is called, and
+which folder it sits in, makes no difference to where its ticket ends up.
+
 A **duplicate** is a second ticket for a showing one person is already going
 to — same person, film, time and venue. The first ticket is the one that
 counts; the rest go to `duplicates/`. (You can also mark a ticket as one by
 hand; see [Handing a showing back](#handing-a-showing-back).)
+
+A sorted ticket is named after its film and reservation code. One reservation
+can cover several tickets, and those would want the same name — the second gets
+`-2` before the `.pdf`, the way a second download does, rather than being left
+out of the output.
 
 Both CSVs carry the same columns: `start_time`, `end_time`, `length_min`,
 `movie`, `issued_to`, `address`, `section`, `reservation_code`, `ticket_code`,
@@ -173,7 +185,8 @@ by the time that file is read it has already had its say.
 
 `--rename-input` renames each PDF in `input/` in place to the name it gets as a
 sorted ticket — `bilety(3).pdf` becomes `matrix-GHI789__jan-nowak.pdf`. It's a
-rename, not a copy: the file stays in `input/`, and this is independent of
+rename, not a copy: the file stays where it is, in `input/` or in whichever
+subfolder of it you kept it in, and this is independent of
 `--upload-drive`/`--create-calendar`.
 
 ```sh

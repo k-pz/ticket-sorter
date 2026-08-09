@@ -34,14 +34,6 @@ def test_local_name(drive_name, expected):
     assert di._local_name(drive_name) == expected
 
 
-def test_free_path_steps_around_what_is_already_there(tmp_path):
-    assert di._free_path(tmp_path, "bilety.pdf") == tmp_path / "bilety.pdf"
-    (tmp_path / "bilety.pdf").touch()
-    assert di._free_path(tmp_path, "bilety.pdf") == tmp_path / "bilety-2.pdf"
-    (tmp_path / "bilety-2.pdf").touch()
-    assert di._free_path(tmp_path, "bilety.pdf") == tmp_path / "bilety-3.pdf"
-
-
 # --- download_unsorted -------------------------------------------------------------
 
 

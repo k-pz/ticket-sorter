@@ -34,6 +34,30 @@ def test_slugify(text, slug):
     assert m.slugify(text) == slug
 
 
+# --- free_path and input_pdfs ------------------------------------------------------
+
+
+def test_free_path_steps_around_what_is_already_there(tmp_path):
+    assert m.free_path(tmp_path, "bilety.pdf") == tmp_path / "bilety.pdf"
+    (tmp_path / "bilety.pdf").touch()
+    assert m.free_path(tmp_path, "bilety.pdf") == tmp_path / "bilety-2.pdf"
+    (tmp_path / "bilety-2.pdf").touch()
+    assert m.free_path(tmp_path, "bilety.pdf") == tmp_path / "bilety-3.pdf"
+
+
+def test_input_pdfs_finds_the_ones_kept_in_subfolders(tmp_path):
+    """A directory holds one `bilety.pdf`, so several tickets means several folders."""
+    for path in ("bilety.pdf", "first/bilety.pdf", "first/second/bilety.pdf", "notes.txt"):
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).touch()
+    (tmp_path / "empty.pdf").mkdir()  # a directory that happens to be named like a PDF
+
+    assert m.input_pdfs(tmp_path) == [
+        tmp_path / "bilety.pdf", tmp_path / "first" / "bilety.pdf",
+        tmp_path / "first" / "second" / "bilety.pdf",
+    ]
+
+
 # --- parse_ticket ------------------------------------------------------------------
 
 
@@ -358,22 +382,50 @@ def test_main_rename_input_renames_the_source_in_place(sorter, make_pdf):
     assert names_in(sorter.input) == ["motor-city-ABC123__anna-nowak.pdf"]
 
 
-def test_main_skips_a_copy_whose_target_is_already_there(sorter, make_pdf, capsys):
+def test_main_copies_every_ticket_whose_name_is_taken(sorter, make_pdf):
+    """One reservation code can cover several tickets, which all want the same output name.
+    Each is a ticket PDF of its own, so each gets copied out under a name of its own."""
     for name in ("1.pdf", "2.pdf", "3.pdf"):
-        make_pdf(name, into=sorter.input)  # the same ticket downloaded three times
+        make_pdf(name, into=sorter.input)
     sorter.run("--rename-input")
 
-    # both duplicate rows name the one file that got copied, and the third source keeps its name
-    assert names_in(sorter.output / "duplicates") == ["motor-city-ABC123.pdf"]
-    assert [row[-1] for row in read_csv(sorter.output / "duplicates.csv")[1:]] == [
-        "duplicates/motor-city-ABC123.pdf"
-    ] * 2
-    assert names_in(sorter.input) == [
-        "3.pdf", "motor-city-ABC123.pdf", "motor-city-ABC123__anna-nowak.pdf"
+    assert names_in(sorter.output / "duplicates") == [
+        "motor-city-ABC123-2.pdf", "motor-city-ABC123.pdf"
     ]
-    err = capsys.readouterr().err
-    assert "skip copy (target exists): motor-city-ABC123.pdf" in err
-    assert "skip rename (target exists): motor-city-ABC123.pdf" in err
+    assert [row[-1] for row in read_csv(sorter.output / "duplicates.csv")[1:]] == [
+        "duplicates/motor-city-ABC123.pdf", "duplicates/motor-city-ABC123-2.pdf"
+    ]
+    # and every source is renamed to the name its own copy got, none of them colliding
+    assert names_in(sorter.input) == [
+        "motor-city-ABC123-2.pdf", "motor-city-ABC123.pdf", "motor-city-ABC123__anna-nowak.pdf"
+    ]
+
+
+def test_main_reads_the_pdfs_in_subfolders_of_the_input(sorter, make_pdf):
+    """Tickets all download as `bilety.pdf`, so several of them means several folders."""
+    make_pdf("bilety.pdf", into=sorter.input / "first")
+    make_pdf("bilety.pdf", into=sorter.input / "second", issued_to="Paweł Żak",
+             reservation_code="B7XQZ1", movie="Matrix", start="12.08.2026 18:00")
+    sorter.run()
+
+    assert names_in(sorter.output / "tickets") == ["anna-nowak", "pawel-zak"]
+    assert len(read_csv(sorter.output / "tickets.csv")) == 3  # header plus both tickets
+
+
+def test_main_rename_input_leaves_a_subfolder_ticket_where_it_is(sorter, make_pdf):
+    make_pdf("bilety.pdf", into=sorter.input / "downloaded")
+    sorter.run("--rename-input")
+
+    assert names_in(sorter.input) == ["downloaded"]
+    assert names_in(sorter.input / "downloaded") == ["motor-city-ABC123__anna-nowak.pdf"]
+
+
+def test_main_names_a_skipped_pdf_by_the_folder_that_tells_it_apart(sorter, make_pdf, capsys):
+    make_pdf("bilety.pdf", into=sorter.input / "first")
+    make_pdf("bilety.pdf", into=sorter.input / "second", lines=["Bilet wstępu", "nothing else useful"])
+    sorter.run()
+
+    assert "skip (unrecognized layout): second/bilety.pdf" in capsys.readouterr().err
 
 
 def test_main_writes_both_csvs_sorted_by_start_time(sorter, make_pdf):
