@@ -4,6 +4,7 @@ import os
 import random
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -22,8 +23,14 @@ MAX_BACKOFF_S = 32
 # 403 covers several unrelated things; only these two mean "you're going too fast".
 RATE_LIMIT_REASONS = {"rateLimitExceeded", "userRateLimitExceeded"}
 
+# Whole-Drive rather than the narrower drive.file, which is what an app that only ever
+# reads back its own uploads would ask for. This one starts by reading two things nobody
+# here made: the `unsorted` folder, created by hand in Drive, and the ticket PDFs dropped
+# into it. drive.file shows an app the files it created itself and nothing else — and it
+# hides them by leaving them out of a listing rather than by refusing it, so a search for
+# that folder comes back empty exactly as if it had never been created.
 SCOPES = [
-    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/calendar",
 ]
@@ -150,6 +157,38 @@ def _from_refresh_token(client: dict, refresh_token: str) -> Credentials:
     )
 
 
+def _check_granted(granted: Sequence[str] | str | None) -> None:
+    """Stop a token that carries less than SCOPES before anything is read with it.
+
+    A refresh token holds the access it was granted at consent and no others: asking for
+    more here doesn't widen one, it gets the old set back and a warning in a log nobody
+    reads. What follows is worse than an error — Drive answers a search made without the
+    scope to see a file with no file rather than with a refusal, so a token granted the
+    older, narrower drive.file makes a folder created by hand look like one that was
+    never created at all.
+
+    Said of whatever the run has to go on: what a stored token records it was granted, or
+    what the token endpoint hands back with a fresh one. Neither is always there, and
+    nothing said is not the same as nothing granted — that goes through, and the API
+    answers for itself.
+    """
+    # A token file is allowed to hold them as one space-separated string, the way the token
+    # endpoint sends them, rather than as a list.
+    listed = set(granted.split() if isinstance(granted, str) else granted or [])
+    missing = [scope for scope in SCOPES if scope not in listed] if listed else []
+    if missing:
+        raise RuntimeError(
+            "The Google token doesn't carry " + ", ".join(missing) + ". A refresh token "
+            "keeps the access you consented to and can't gain more, so one made before "
+            "this app asked for these leaves the run finding none of what it's meant to "
+            "read — a Drive search made without the scope to see a file comes back empty "
+            "rather than refused. Authorize again, asking for all of: "
+            f"{' '.join(SCOPES)} — and replace ${REFRESH_ENV} (or ${TOKEN_ENV}, or "
+            "token.json) with what that hands back. See 'Setting it up from a phone' in "
+            "README.md."
+        )
+
+
 def _stored_credentials(token_path: Path) -> tuple[Credentials | None, bool]:
     """What a run has to go on before it talks to Google, and whether it came from the
     environment. Three ways in, in the order they're preferred: a whole token.json in
@@ -158,16 +197,22 @@ def _stored_credentials(token_path: Path) -> tuple[Credentials | None, bool]:
     token = _env_json(TOKEN_ENV, "a token file's contents")
     if token:
         try:
-            return Credentials.from_authorized_user_info(token, SCOPES), True
+            creds = Credentials.from_authorized_user_info(token, SCOPES)
         except ValueError as error:
             raise RuntimeError(f"${TOKEN_ENV} is set, but isn't a token file's contents: {error}") from error
+        # What the file records it was granted, which loading it drops in favour of what
+        # this run asks for — and which is the only word on the matter until a refresh.
+        _check_granted(token.get("scopes"))
+        return creds, True
 
     client, refresh_token = _oauth_client(), os.environ.get(REFRESH_ENV)
     if client and refresh_token:
         return _from_refresh_token(client, refresh_token), True
 
     if token_path.exists():
-        return Credentials.from_authorized_user_file(str(token_path), SCOPES), False
+        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+        _check_granted(json.loads(token_path.read_text()).get("scopes"))
+        return creds, False
     return None, False
 
 
@@ -210,6 +255,7 @@ def get_credentials(credentials_path: Path, token_path: Path) -> Credentials:
         creds.refresh(Request())
     else:
         creds = _authorize(credentials_path)
+    _check_granted(creds.granted_scopes)
     if not from_env:
         token_path.write_text(creds.to_json())
     return creds

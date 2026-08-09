@@ -285,6 +285,12 @@ files that this run wouldn't upload — tickets that changed name, recipients wh
 dropped out — get moved to the trash. The two CSVs and the Sheet are always
 rewritten, since their contents change every run.
 
+That folder is the run's to keep tidy, so **don't put anything of your own in
+it** beyond the two things it's told to leave alone: `unsorted`, the drop point
+`--input-drive` reads, and the `config.toml` that `--config-drive` keeps there.
+Anything else is something a previous run left behind, as far as the sync can
+tell, and it goes to the trash — where Drive holds it for 30 days.
+
 ## Creating the Google Calendars
 
 Add `--create-calendar` (alongside `--upload-drive`, since events link to the
@@ -509,6 +515,12 @@ Notes:
   names out of the PDFs rather than off them.
 - Anything in `unsorted` that isn't a PDF is skipped with a note, the same way
   a stray file in `input/` is.
+- **This is what makes the whole-Drive scope necessary.** That folder and the
+  PDFs in it are yours, not the app's, and Google's narrower `drive.file` shows
+  an app only what it created itself — so a run holding a token granted that
+  looks for the folder you made and finds nothing there. If a run stops saying
+  a scope is missing, that's this: authorize again (see below) and replace the
+  token.
 - **A run that would sort nothing stops instead**, saying so, when that folder
   is missing or holds no PDFs. Sorting nothing isn't a quiet no-op here: the
   upload syncs, so it would take every ticket, row and event an earlier run
@@ -608,7 +620,7 @@ it's a normal web page, so a phone is fine.
 4. In **Step 1**, type these three scopes into the "input your own scopes" box:
 
    ```
-   https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar
+   https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/calendar
    ```
 
    Tap **Authorize APIs**, sign in, and accept. In **Step 2**, tap **Exchange
@@ -618,8 +630,18 @@ it's a normal web page, so a phone is fine.
    box already in front of you — and run the workflow from the **Actions** tab.
 
 All three scopes have to be authorized together in step 4: the token you get
-carries exactly what you asked for, and one missing scope fails the run with
-"Not all requested scopes were granted" rather than half-working.
+carries exactly what you consented to and can never gain more, so a run asking
+for a scope its token was never granted doesn't acquire it — it just goes
+without. A run checks for that before it reads anything, and stops saying which
+scope is missing, because the alternative is worse than an error: Drive answers
+a search made without the scope to see a file with *no file*, so a missing
+scope would otherwise surface as an `unsorted` folder that isn't there.
+
+**Authorized before August 2026?** Re-do step 4 and replace the secret. Runs
+used to ask for `drive.file` — access to files this app created itself — which
+can't see the `unsorted` folder you made by hand or the PDFs you dropped into
+it. That's the whole of the widening: it's the first scope in the box above
+that changed, from `drive.file` to `drive`.
 
 Using your own client id here rather than the Playground's is also what stops
 the Playground revoking the refresh token after 24 hours, so don't skip step 3's
@@ -650,7 +672,7 @@ it's set up with.
   of the token, not of how you store it or where you made it — the Playground
   route above included. What does change it is **Publish app** on the OAuth
   consent screen (worth doing before step 3, and worth doing from a phone in
-  about four taps): for sensitive scopes an
+  about four taps): for sensitive and restricted scopes alike an
   unverified app still works for its own owner (with a warning screen at
   authorization time, and a cap on how many users it can have), and its refresh
   tokens stop expiring on a weekly clock.
@@ -661,11 +683,20 @@ it's set up with.
   `storageQuotaExceeded`; the calendars it made would be its own too. The
   tickets have to land in *your* Drive, which means acting as you.
 - **Those secrets are a key to your Google account**, within the scopes the
-  token was granted: files this app created in Drive (`drive.file`), your
-  spreadsheets, and your calendars. Anyone who can push to the repository, or
-  edit a workflow in it, can use them. GitHub doesn't hand secrets to workflows
-  from forked pull requests, but a private repository is still the right home
-  for this.
+  token was granted: **all of your Drive** (`drive`), your spreadsheets, and
+  your calendars. Anyone who can push to the repository, or edit a workflow in
+  it, can use them. GitHub doesn't hand secrets to workflows from forked pull
+  requests, but a private repository is still the right home for this.
+- **Whole-Drive access is what reading the input costs.** The narrower
+  `drive.file` — files this app created itself — is what an app that only reads
+  back its own uploads would ask for, and it was what this one asked for until
+  the `unsorted` folder became where the tickets come from: a folder you made
+  by hand, holding PDFs you dropped in, is none of an app's own files. Google
+  calls this one a *restricted* scope, which changes nothing for you as the
+  app's own owner beyond the wording on the consent screen. Every run asks for
+  the same three scopes whatever its flags say, so a local run reading `input/`
+  gets a token carrying this one too, even though it touches nothing but the
+  files it made itself.
 - **`--merge-names` can't run there**: it's a conversation. Merge names in a
   local run with `--config-drive` (any run with it, including one that also
   uses `--input-drive`), and the answers land in the `config.toml` kept in
