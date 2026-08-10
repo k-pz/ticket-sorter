@@ -653,6 +653,17 @@ credentials as secrets has nowhere of its own to keep one. A run with no usable
 credentials and no terminal to open a browser on says so, rather than hanging
 on a browser that's never coming back.
 
+A run says what it's doing as it does it — each PDF downloaded, each showing
+stitched, each calendar synced — and says it a line at a time rather than in one
+lump at the end, so the Actions log is something you can watch, and stopping a
+run part-way still leaves you everything it got as far as. The one thing in
+there said on someone else's behalf is a tally like `note: pypdf, stitching the
+showings: "Object 1 0 not defined." ×127`. Nothing is wrong: biletomat's tickets
+name objects they don't contain, pypdf notices once per lookup while the
+showings are being stitched, and it reads a reference it can't resolve as empty
+and stitches the page in whole regardless. Counting them is what keeps a
+hundred-odd identical lines out of the log.
+
 ### Setting it up from a phone
 
 You never need a terminal for any of this. What you need is one consent in a

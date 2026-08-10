@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import conftest
 import pypdf
 import pytest
+from pypdf.generic import IndirectObject, NameObject
 
 # the package's __init__ re-exports main(), shadowing the submodule of the same name
 m = importlib.import_module("ticket_sorter.main")
@@ -550,6 +551,53 @@ def test_main_writes_both_csvs_sorted_by_start_time(sorter, make_pdf):
     assert [(row[0], row[7]) for row in duplicates] == [
         ("2026-08-11 21:30", "EARLY2"), ("2026-08-12 18:00", "LATE02"),
     ]
+
+
+# --- what the run says while it runs -----------------------------------------------
+
+
+def with_a_dangling_reference(path):
+    """Rewrite a ticket PDF to name an object it doesn't contain — here a page thumbnail —
+    as biletomat's own exports do. Reading the text never follows the reference; stitching a
+    showing goes over the whole of every page, so that is where pypdf notices."""
+    writer = pypdf.PdfWriter(clone_from=path)
+    writer.pages[0][NameObject("/Thumb")] = IndirectObject(99, 0, writer)
+    writer.write(path)
+    return path
+
+
+def test_main_tallies_pypdfs_complaints_rather_than_repeating_them(sorter, make_pdf, capsys):
+    """pypdf says so once per lookup, straight to stderr and with nothing naming the file it
+    means — hundreds of identical lines over a festival's worth of tickets, burying whatever
+    the run itself had to say. It is worth one line: an unresolvable reference reads as null
+    and the ticket is stitched in whole regardless."""
+    for n, holder in enumerate(["Anna Nowak", "Paweł Żak", "Jan Kowalski"], 1):
+        with_a_dangling_reference(
+            make_pdf(f"{n}.pdf", into=sorter.input, issued_to=holder, reservation_code=f"ABC12{n}")
+        )
+    sorter.run()
+
+    err = capsys.readouterr().err
+    assert 'note: pypdf, stitching the showings: "Object 99 0 not defined." ×3' in err
+    assert err.count("Object 99 0 not defined.") == 1  # the tally, and not a line per lookup
+    # and the showing is stitched all the same, out of all three tickets
+    assert len(pypdf.PdfReader(sorter.by_showing / "2026-08-11-2130-motor-city.pdf").pages) == 3
+
+
+def test_main_line_buffers_its_own_output(sorter, make_pdf, monkeypatch):
+    """Block-buffered — which is what stdout is anywhere but a terminal, a GitHub Actions log
+    included — a run says nothing until it exits, and a run stopped part-way says nothing at
+    all. Every progress line it prints is there to be read while it works."""
+    stdout = io.TextIOWrapper(io.BytesIO(), line_buffering=False)
+    monkeypatch.setattr(sys, "stdout", stdout)
+    make_pdf("1.pdf", into=sorter.input)
+    sorter.run()
+
+    assert stdout.line_buffering
+    # nothing flushed it: the lines are through because each one went as it was printed
+    written_out = stdout.buffer.getvalue()  # type: ignore[unresolved-attribute]
+    assert b"Stitching 1 showing PDFs (1 tickets)..." in written_out
+    assert b"wrote 1 tickets and 0 duplicates" in written_out
 
 
 # --- input taken from Drive --------------------------------------------------------

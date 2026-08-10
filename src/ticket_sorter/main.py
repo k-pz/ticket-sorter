@@ -3,12 +3,15 @@
 import argparse
 import csv
 import hashlib
+import io
+import logging
 import os
 import re
 import shutil
 import sys
 import unicodedata
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -213,6 +216,48 @@ def input_pdfs(directory: Path) -> list[Path]:
     return found
 
 
+class _Complaints(logging.Handler):
+    """A log handler that keeps a tally by wording rather than writing anything out."""
+
+    def __init__(self):
+        super().__init__()
+        self.counts = Counter()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.counts[record.getMessage()] += 1
+
+
+@contextmanager
+def pypdf_complaints(doing: str):
+    """Tally what pypdf has to say about the ticket PDFs, and say it once at the end.
+
+    biletomat's exports name objects they don't contain. Reading a ticket's text never
+    follows those references, but stitching a showing walks the whole of every ticket, so
+    pypdf says so — through `logging`, which with no logging set up means a bare line
+    straight to stderr, one per lookup, with no file name and nothing to say what it means.
+    A run of a hundred-odd tickets is hundreds of "Object 1 0 not defined." and nothing
+    else, which reads like the run coming apart.
+
+    It isn't: pypdf reads a reference it can't resolve as null and the page still comes out
+    whole. So the count and the wording, said once and marked as a note like the rest, is
+    all of that worth keeping — and the log stays the run's own to talk in.
+    """
+    logger = logging.getLogger("pypdf")
+    handler = _Complaints()
+    # Having a handler at all is also what stops logging's bare last-resort one.
+    logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+        # Only the common few by name: one broken reference per ticket is one line, while a
+        # PDF broken in some way of its own would otherwise be a hundred lines of its own.
+        for message, count in handler.counts.most_common(5):
+            print(f'note: pypdf, {doing}: "{message}"{f" ×{count}" if count > 1 else ""}', file=sys.stderr)
+        if len(handler.counts) > 5:
+            print(f"note: pypdf, {doing}: and {len(handler.counts) - 5} other complaints", file=sys.stderr)
+
+
 def parse_ticket(path: Path):
     lines = [line.strip() for line in pypdf.PdfReader(path).pages[0].extract_text().split("\n")]
     while lines and lines[-1] == "":
@@ -357,6 +402,16 @@ def rename_sources(renames: dict, drive_files: dict, credentials_path: Path, tok
 
 
 def main():
+    # Anywhere but a terminal — a GitHub Actions log, or a tee — Python holds stdout in a
+    # block buffer and lets the lot out at exit. A run takes minutes, and everything it
+    # prints as it goes is there to be read while it goes; buffered, it says nothing until
+    # it is over, and a run stopped part-way says nothing at all. A flush per line is what
+    # that costs, and it also puts the notes back beside what they're about, stderr being
+    # line-buffered already. Under a test runner stdout is something else again, with
+    # nothing to reconfigure and nothing needing it, so it's asked of a real stream only.
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(line_buffering=True)
+
     args = parse_args()
 
     # Empty rather than None when nothing needs it: every reader of it is behind a flag that
@@ -371,15 +426,16 @@ def main():
         drive_files = download_unsorted(name, input_dir, args.credentials, args.token)
 
     tickets = []
-    for pdf in input_pdfs(input_dir):
-        ticket = parse_ticket(pdf)
-        if ticket is None:
-            # Named by where it sits under the input folder, not just by its file name:
-            # several of those are `bilety.pdf` and only the folder tells them apart.
-            print(f"skip (unrecognized layout): {pdf.relative_to(input_dir)}", file=sys.stderr)
-            continue
-        ticket["source"] = pdf
-        tickets.append(ticket)
+    with pypdf_complaints("reading the tickets"):
+        for pdf in input_pdfs(input_dir):
+            ticket = parse_ticket(pdf)
+            if ticket is None:
+                # Named by where it sits under the input folder, not just by its file name:
+                # several of those are `bilety.pdf` and only the folder tells them apart.
+                print(f"skip (unrecognized layout): {pdf.relative_to(input_dir)}", file=sys.stderr)
+                continue
+            ticket["source"] = pdf
+            tickets.append(ticket)
 
     # Said out loud, because it's otherwise silent: the run carries on, and the showing
     # just gets a calendar event of a made-up length. Most of these are events the program
@@ -471,13 +527,16 @@ def main():
     # The second grouping: everyone's tickets for one showing stitched into one PDF, so a
     # showing is handed over or printed as a single file. In holder order and bookmarked
     # by holder, since one page of it otherwise looks much like the next.
-    for slug, group in by_showing.items():
-        writer = pypdf.PdfWriter()
-        for t in sorted(group, key=lambda t: (t["issued_to"], t["reservation_code"])):
-            writer.append(OUTPUT_DIR / t["file"], outline_item=t["issued_to"])
-        showing_pdf = TICKETS_DIR / BY_SHOWING / f"{slug}.pdf"
-        showing_pdf.parent.mkdir(parents=True, exist_ok=True)
-        writer.write(showing_pdf)
+    print(f"Stitching {len(by_showing)} showing PDFs ({len(rows)} tickets)...")
+    with pypdf_complaints("stitching the showings"):
+        for n, (slug, group) in enumerate(by_showing.items(), 1):
+            writer = pypdf.PdfWriter()
+            for t in sorted(group, key=lambda t: (t["issued_to"], t["reservation_code"])):
+                writer.append(OUTPUT_DIR / t["file"], outline_item=t["issued_to"])
+            showing_pdf = TICKETS_DIR / BY_SHOWING / f"{slug}.pdf"
+            showing_pdf.parent.mkdir(parents=True, exist_ok=True)
+            writer.write(showing_pdf)
+            print(f"  [{n}/{len(by_showing)}] {showing_pdf.name} ({len(group)} tickets)")
 
     if args.rename_input:
         rename_sources(renames, drive_files, args.credentials, args.token)
