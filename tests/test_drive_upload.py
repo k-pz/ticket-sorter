@@ -474,32 +474,6 @@ def test_sync_keeps_what_no_run_uploads(fake_google):
     assert len(http.request_sequence) == 1  # the listing, and nothing trashed
 
 
-# --- _shortcut_to ------------------------------------------------------------------
-
-
-def test_shortcut_to_leaves_one_already_pointing_at_the_ticket(fake_google):
-    """What makes re-running the grouping free once it's been built."""
-    drive, http = service(fake_google, [])
-    existing = {"t.pdf": {"id": "S1", "shortcutDetails": {"targetId": "F1"}}}
-
-    assert du._shortcut_to(drive, existing, "t.pdf", "F1", "SHOW1") is False
-    assert http.request_sequence == []
-
-
-def test_shortcut_to_replaces_one_pointing_somewhere_else(fake_google):
-    """A shortcut outlives the file it names, so one left over from a PDF that was
-    removed by hand and uploaded again opens an error page instead of the ticket."""
-    drive, http = service(fake_google, [{}, {"id": "S2"}])
-    existing = {"t.pdf": {"id": "S1", "shortcutDetails": {"targetId": "GONE"}}}
-
-    assert du._shortcut_to(drive, existing, "t.pdf", "F1", "SHOW1") is True
-    assert bodies(http) == [
-        {"trashed": True},
-        {"name": "t.pdf", "mimeType": du.SHORTCUT_MIME, "parents": ["SHOW1"],
-         "shortcutDetails": {"targetId": "F1"}},
-    ]
-
-
 # --- find_child --------------------------------------------------------------------
 
 
@@ -561,6 +535,7 @@ def test_read_sheet_marks_with_only_one_tab_returned(fake_google):
 def test_upload_to_drive(fake_google, make_pdf, make_ticket, tmp_path):
     out = tmp_path / "out"
     make_pdf("motor-city.pdf", into=out / "tickets" / "by-holder" / "anna-nowak")
+    make_pdf("2026-08-11-2130-motor-city.pdf", into=out / "tickets" / "by-showing")
     make_pdf("vice.pdf", into=out / "duplicates")
     (out / "tickets.csv").write_text("reservation_code\nABC123\n")
     (out / "duplicates.csv").write_text("reservation_code\nB7QQQ1\n")
@@ -585,10 +560,8 @@ def test_upload_to_drive(fake_google, make_pdf, make_ticket, tmp_path):
         {"files": [{"id": "D1", "name": "vice.pdf", "webViewLink": "https://drive/D1",
                     "permissions": [{"type": "user", "role": "owner"}]}]},  # sync duplicates/: already there
         {},                     # ...but not link-shared, so share it
-        {"files": []},          # sync by-showing/: no showing folders yet
-        {"id": "SHOW1"},        # create the one this ticket is for
-        {"files": []},          # sync it: nothing pointing into it yet
-        {"id": "S1"},           # so a shortcut to the PDF is made
+        {"files": []},          # sync by-showing/: no showing PDFs yet
+        {"id": "SHOW1"},        # so this showing's stitched PDF is uploaded
         {}, {},                 # tickets.csv, duplicates.csv
         {"spreadsheetId": "SS1", "sheets": [  # create the Sheet
             {"properties": {"title": "Tickets", "sheetId": 0}},
@@ -613,17 +586,18 @@ def test_upload_to_drive(fake_google, make_pdf, make_ticket, tmp_path):
     assert ticket["drive_link"] == "https://drive/F1"
     assert duplicate["drive_link"] == "https://drive/D1"  # reused rather than uploaded again
 
-    # tickets/ holds the two groupings, and each holds a folder per person / per showing
+    # tickets/ holds the two groupings; only by-holder/ has a folder per person under it,
+    # since a showing is one stitched PDF rather than a folder of everyone's tickets
     assert [(b["name"], b.get("parents")) for b in bodies(http) if b and b.get("mimeType") == du.FOLDER_MIME] == [
         ("Octopus", None), ("tickets", ["ROOT"]), ("duplicates", ["ROOT"]),
-        ("by-holder", ["TICKETS"]), ("by-showing", ["TICKETS"]),
-        ("anna-nowak", ["HOLDER"]), ("2026-08-11-2130-motor-city", ["SHOWING"]),
+        ("by-holder", ["TICKETS"]), ("by-showing", ["TICKETS"]), ("anna-nowak", ["HOLDER"]),
     ]
-    # and the showing's folder points at the upload rather than holding a second copy of it
-    assert [b for b in bodies(http) if b and b.get("mimeType") == du.SHORTCUT_MIME] == [
-        {"name": "motor-city.pdf", "mimeType": du.SHORTCUT_MIME, "parents": ["SHOW1"],
-         "shortcutDetails": {"targetId": "F1"}}
-    ]
+    # and that PDF is uploaded into by-showing/. A file's bytes are the request body, so
+    # what it's called and where it goes ride along in the multipart body rather than in one.
+    sent = "\n".join(b.decode("utf-8", "replace") if isinstance(b, bytes) else b or ""
+                     for _uri, _method, b, _headers in http.request_sequence)
+    assert '{"name": "motor-city.pdf", "parents": ["ANNA"]}' in sent
+    assert '{"name": "2026-08-11-2130-motor-city.pdf", "parents": ["SHOWING"]}' in sent
 
     shares = [(u.split("/files/")[1].split("/permissions")[0], b["role"])
               for u, b in zip(uris(http), bodies(http), strict=True) if b and b.get("type") == "anyone"]

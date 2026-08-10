@@ -25,9 +25,10 @@ TICKETS_DIR = OUTPUT_DIR / "tickets"
 DUPLICATES_DIR = OUTPUT_DIR / "duplicates"
 
 # The two ways the sorted tickets are grouped, as a subfolder of tickets/ each. Every
-# sorted ticket is filed under both: one folder per person answers "what am I going to?",
-# one folder per showing answers "who is coming to this?", and neither answer is one you
-# should have to assemble out of the other by hand.
+# sorted ticket is filed under both: a folder per person answers "what am I going to?",
+# and one stitched PDF per showing answers "who is coming to this?" — a single file to
+# hand over or print at the door, rather than a folder to gather up first. Neither answer
+# is one you should have to assemble out of the other by hand.
 BY_HOLDER = "by-holder"
 BY_SHOWING = "by-showing"
 
@@ -35,11 +36,18 @@ DATE_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}$")
 
 # Runtimes in minutes for every film on the program, from each one's "Czas"
 # field on https://octopusfilmfestival.com/wydarzenie/<slug>/ (linked from
-# https://octopusfilmfestival.com/program/). Keyed by title; entries with a
-# "+ spotkanie..." suffix use whichever wording that film's own ticket or
-# event page uses (they can differ), and some titles appear twice with a
-# straight vs. curly apostrophe for the same reason. Events with no listed
-# runtime (talks, panels, club nights, etc.) are simply absent.
+# https://octopusfilmfestival.com/program/). Last checked against all 143
+# showings on 2026-08-10: 86 titles list one, and none had changed.
+#
+# Keyed by the title the *ticket* carries, which isn't always the site's:
+# biletomat renames some events outright, and others differ only in a straight
+# vs. curly apostrophe, so one film can appear here under both spellings.
+#
+# The remaining 22 events — talks, panels, club nights, and a few films the
+# site just doesn't measure — list no runtime anywhere, and are absent; their
+# events fall back to calendar_upload's FALLBACK_LENGTH_MIN. The program's own
+# timeslots can't stand in: consecutive slots at one venue sit 60 to 300
+# minutes apart, and ten of the 22 are the last thing on there that day.
 FILM_LENGTHS_MIN = {
     "Amerykańska muzyka pop": 96,
     "Amerykański domek dla lalek": 87,
@@ -68,7 +76,8 @@ FILM_LENGTHS_MIN = {
     "I Want Your Sex": 90,
     "Inni": 101,
     "Kim jest Fabio Soldani?": 47,
-    "Klub Komediowy vs. VHS Hell – Bitwa lektorów": 90,
+    "Klub Komediowy vs VHS HELL pojedynek lektorów": 90,  # what the ticket calls it
+    "Klub Komediowy vs. VHS Hell – Bitwa lektorów": 90,   # and what the program does
     "Kot Fritz": 78,
     "Krzycz, królowo! Mój prywatny koszmar na ulicy Wiązów": 99,
     "Krótkie metraże z ASP w Gdańsku": 48,
@@ -139,12 +148,12 @@ def slugify(text: str) -> str:
 
 
 def showing_slug(ticket: dict) -> str:
-    """The folder one showing's tickets are grouped into: when it starts, then what's on.
+    """The name one showing's tickets are stitched into: when it starts, then what's on.
 
     Time first, so that listing by-showing/ reads as the festival's running order rather
     than as an alphabet of film titles. The venue is left out for brevity, so one film
-    playing at two places in the same minute would share a folder — nothing a single
-    program does, and the files inside still name their holder and reservation code.
+    playing at two places in the same minute would share a PDF — nothing a single program
+    does, and its pages are bookmarked by holder either way.
     """
     return f"{ticket['start_time']:%Y-%m-%d-%H%M}-{slugify(ticket['movie'])}"
 
@@ -372,6 +381,13 @@ def main():
         ticket["source"] = pdf
         tickets.append(ticket)
 
+    # Said out loud, because it's otherwise silent: the run carries on, and the showing
+    # just gets a calendar event of a made-up length. Most of these are events the program
+    # lists no runtime for at all, but a title biletomat spells its own way looks exactly
+    # the same from here — and that one is fixed by adding it to FILM_LENGTHS_MIN.
+    for movie in sorted({t["movie"] for t in tickets if t["length_min"] is None}):
+        print(f"note: no runtime known for {movie} — its event gets a fallback length", file=sys.stderr)
+
     # One person can have tickets issued to several spellings of their name; the
     # saved aliases collapse those before anything is grouped by ticket holder.
     stored_aliases = load_aliases(args.config)
@@ -414,6 +430,7 @@ def main():
     OUTPUT_DIR.mkdir(parents=True)
 
     rows, duplicate_rows = [], []
+    by_showing = {}  # showing slug -> the tickets stitched into that showing's PDF
     seen_shows = set()
     renames = {}  # source -> the name its ticket got, applied once every source has one
     for ticket in tickets:
@@ -445,15 +462,22 @@ def main():
         # gets uploaded and linked from the Sheet and the calendars.
         ticket["file"] = str(new_path.relative_to(OUTPUT_DIR))
 
-        # Filed a second time under the showing it's for, under the name its first copy
-        # settled on, so that the two groupings name one ticket the same way.
         if not is_duplicate:
-            showing_dir = TICKETS_DIR / BY_SHOWING / showing_slug(ticket)
-            showing_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, free_path(showing_dir, new_path.name))
+            by_showing.setdefault(showing_slug(ticket), []).append(ticket)
 
         renames[source] = new_path.name
         (duplicate_rows if is_duplicate else rows).append(ticket)
+
+    # The second grouping: everyone's tickets for one showing stitched into one PDF, so a
+    # showing is handed over or printed as a single file. In holder order and bookmarked
+    # by holder, since one page of it otherwise looks much like the next.
+    for slug, group in by_showing.items():
+        writer = pypdf.PdfWriter()
+        for t in sorted(group, key=lambda t: (t["issued_to"], t["reservation_code"])):
+            writer.append(OUTPUT_DIR / t["file"], outline_item=t["issued_to"])
+        showing_pdf = TICKETS_DIR / BY_SHOWING / f"{slug}.pdf"
+        showing_pdf.parent.mkdir(parents=True, exist_ok=True)
+        writer.write(showing_pdf)
 
     if args.rename_input:
         rename_sources(renames, drive_files, args.credentials, args.token)

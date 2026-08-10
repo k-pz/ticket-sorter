@@ -27,7 +27,10 @@ basic sorting needs none of it.
 
 Film runtimes (used for the end times and the calendar events) come from a
 lookup table in `src/ticket_sorter/main.py`, taken off each film's page on
-<https://octopusfilmfestival.com/program/> and keyed by title.
+<https://octopusfilmfestival.com/program/> and keyed by the title the ticket
+carries — which biletomat sometimes spells its own way, so a film can be in
+there twice. Anything the run has no runtime for is named on stderr as it
+sorts; 22 events on the program (talks, panels, club nights) list none at all.
 
 ---
 
@@ -85,12 +88,9 @@ output/
 │   │   └── anna-nowak/
 │   │       └── vampyres-GHI789__anna-nowak.pdf
 │   └── by-showing/
-│       ├── 2026-08-11-2130-motor-city/
-│       │   └── motor-city-ABC123__jan-kowalski.pdf
-│       ├── 2026-08-12-1800-zoolander/
-│       │   └── zoolander-DEF456__jan-kowalski.pdf
-│       └── 2026-08-12-2200-vampyres/
-│           └── vampyres-GHI789__anna-nowak.pdf
+│       ├── 2026-08-11-2130-motor-city.pdf
+│       ├── 2026-08-12-1800-zoolander.pdf
+│       └── 2026-08-12-2200-vampyres.pdf
 ├── duplicates/
 │   └── motor-city-JKL012.pdf
 ├── tickets.csv
@@ -99,10 +99,12 @@ output/
 
 Every sorted ticket is filed twice, under the two things you'd want to look it
 up by: **`by-holder/`** has a folder per person — what one of you is going to,
-ready to hand over whole — and **`by-showing/`** has a folder per screening,
-holding everyone who is coming to it. Showing folders lead with the start time,
-so listing `by-showing/` reads as the festival's running order, and the same
-film at two times is two folders.
+ready to hand over whole — and **`by-showing/`** has one PDF per screening,
+holding everyone who is coming to it, stitched together in the order their
+names sort in and bookmarked by holder. That's the file to print or hand over
+at the door: one screening, one document, rather than a folder to gather up
+first. Showing PDFs lead with the start time, so listing `by-showing/` reads as
+the festival's running order, and the same film at two times is two PDFs.
 
 Every PDF under `input/` is read, subfolders included. Tickets download from
 biletomat.pl all called `bilety.pdf`, and a folder can only hold one file under
@@ -121,14 +123,14 @@ hand already, so both of those pairs are read in full.
 A **duplicate** is a second ticket for a showing one person is already going
 to — same person, film, time and venue. The first ticket is the one that
 counts; the rest go to `duplicates/`, and to neither of the two groupings — a
-showing's folder is who is going, and a second ticket for one would overstate
+showing's PDF is who is going, and a second ticket in it would overstate
 that. (You can also mark a ticket as one by hand; see
 [Handing a showing back](#handing-a-showing-back).)
 
-A sorted ticket is named after its film and reservation code, and carries the
-same name in both groupings. One reservation can cover several tickets, and
-those would want the same name — the second gets `-2` before the `.pdf`, the
-way a second download does, rather than being left out of the output.
+A sorted ticket is named after its film and reservation code. One reservation
+can cover several tickets, and those would want the same name — the second gets
+`-2` before the `.pdf`, the way a second download does, rather than being left
+out of the output.
 
 Both CSVs carry the same columns: `start_time`, `end_time`, `length_min`,
 `movie`, `issued_to`, `address`, `section`, `reservation_code`, `ticket_code`,
@@ -293,11 +295,9 @@ Needs the [Google setup](#4-google-setup-once) above.
 
 Add `--upload-drive` to also upload everything to a Google Drive folder
 (mirroring the `tickets/`/`duplicates/` layout, plus the two CSVs) and build a
-Google Sheet with a `Tickets` tab and a `Duplicates` tab. A file in Drive has
-one parent folder and no more, so a ticket is uploaded once — into
-`tickets/by-holder/` — and the `tickets/by-showing/` folders hold shortcuts to
-it. They open the same PDF, cost a shortcut rather than a second upload, and
-leave one file per ticket to share by link instead of two. Each row gets a
+Google Sheet with a `Tickets` tab and a `Duplicates` tab. Individual tickets go
+up into `tickets/by-holder/`, and `tickets/by-showing/` gets the stitched
+per-screening PDFs as they are locally. Each row gets a
 "ticket_pdf" column that links straight to the uploaded PDF, and both tabs get
 a bold frozen header row with a filter applied so you can sort/filter them like
 a normal table.
@@ -319,16 +319,19 @@ Two things are shared by link, so what you hand out actually opens:
 
 The folders themselves stay private, so the PDFs are reachable only through a
 link someone was given — there's no folder to browse and no way to enumerate
-tickets that weren't shared. Sharing is checked against what's already set (for
+tickets that weren't shared. The stitched `by-showing/` PDFs aren't link-shared
+either: each one holds several people's tickets, and nothing links to it.
+Sharing is checked against what's already set (for
 the PDFs, off the folder listing that's read anyway), so a re-run doesn't
 re-share anything: it's ~one extra write per newly uploaded PDF and none after.
 
-Re-running syncs rather than re-uploads: a PDF already in Drive under the name
-this run would give it is left alone (its existing link is reused), a shortcut
-already pointing at it costs nothing either, and only files that this run
-wouldn't upload — tickets that changed name, recipients who dropped out,
-showings nobody is going to any more — get moved to the trash. The two CSVs and the Sheet are always
-rewritten, since their contents change every run.
+Re-running syncs rather than re-uploads: a ticket PDF already in Drive under
+the name this run would give it is left alone (its existing link is reused),
+and only files that this run wouldn't upload — tickets that changed name,
+recipients who dropped out, showings nobody is going to any more — get moved to
+the trash. The showing PDFs, the two CSVs and the Sheet are always rewritten,
+since their contents change every run — one more person going to a screening
+changes that screening's PDF.
 
 That folder is the run's to keep tidy, so **don't put anything of your own in
 it** beyond the two things it's told to leave alone: `unsorted`, the drop point
@@ -366,7 +369,9 @@ Notes:
 - Events are scheduled in the festival's local timezone (Europe/Warsaw), not
   whatever timezone your Google account or machine uses.
 - If a movie's runtime isn't in the `FILM_LENGTHS_MIN` lookup table in
-  `src/ticket_sorter/main.py`, its event falls back to a 90-minute length.
+  `src/ticket_sorter/main.py`, its event falls back to a 90-minute length. The
+  sorting run prints a `note: no runtime known for ...` for each such title, so
+  a name the table spells differently shows up rather than passing silently.
 - Each printed `Calendar (<person>):` link opens that person's calendar and, as
   described below, is all anyone needs to add it to their own Google Calendar.
 
@@ -534,7 +539,7 @@ Octopus 2026 Tickets/     <- the folder named by config.toml
 │   └── ...
 ├── tickets/              <- and the run produces all of this
 │   ├── by-holder/        <- the uploaded PDFs, a folder per person
-│   └── by-showing/       <- shortcuts to them, a folder per screening
+│   └── by-showing/       <- one stitched PDF per screening
 ├── duplicates/
 ├── tickets.csv
 ├── duplicates.csv
