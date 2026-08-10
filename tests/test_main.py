@@ -15,6 +15,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import conftest
+import pypdf
 import pytest
 
 # the package's __init__ re-exports main(), shadowing the submodule of the same name
@@ -304,37 +305,37 @@ def test_main_files_each_ticket_under_its_recipient(sorter, make_pdf):
     assert names_in(sorter.output / "duplicates") == []
 
 
-def test_main_files_each_ticket_under_its_showing_as_well(sorter, make_pdf):
-    """The same tickets grouped the other way: a folder per showing, holding everyone
+def test_main_stitches_each_showing_into_one_pdf(sorter, make_pdf):
+    """The same tickets grouped the other way: one PDF per showing, holding everyone
     going to it. One film at two times is two showings, not one."""
-    make_pdf("1.pdf", into=sorter.input)
-    make_pdf("2.pdf", into=sorter.input, issued_to="Paweł Żak", reservation_code="B7XQZ1")
+    make_pdf("1.pdf", into=sorter.input, issued_to="Paweł Żak", reservation_code="B7XQZ1")
+    make_pdf("2.pdf", into=sorter.input)
     make_pdf("3.pdf", into=sorter.input, reservation_code="C3PO99", start="12.08.2026 18:00")
     sorter.run()
 
-    assert names_in(sorter.by_showing) == ["2026-08-11-2130-motor-city", "2026-08-12-1800-motor-city"]
-    assert names_in(sorter.by_showing / "2026-08-11-2130-motor-city") == [
-        "motor-city-ABC123__anna-nowak.pdf", "motor-city-B7XQZ1__pawel-zak.pdf",
+    assert names_in(sorter.by_showing) == [
+        "2026-08-11-2130-motor-city.pdf", "2026-08-12-1800-motor-city.pdf",
     ]
-    assert names_in(sorter.by_showing / "2026-08-12-1800-motor-city") == [
-        "motor-city-C3PO99__anna-nowak.pdf"
-    ]
-    # and it's the same ticket in both groupings, under the one name
-    assert (sorter.by_showing / "2026-08-11-2130-motor-city" / "motor-city-ABC123__anna-nowak.pdf").read_bytes() == (
-        sorter.by_holder / "anna-nowak" / "motor-city-ABC123__anna-nowak.pdf"
-    ).read_bytes()
+    stitched = pypdf.PdfReader(sorter.by_showing / "2026-08-11-2130-motor-city.pdf")
+    assert len(stitched.pages) == 2
+    # in holder order, whatever order the input was read in, and bookmarked by holder
+    # (one flat entry each: the tickets carry no outline of their own to nest under it)
+    assert [o.title for o in stitched.outline if not isinstance(o, list)] == ["Anna Nowak", "Paweł Żak"]
+    assert "ABC123" in stitched.pages[0].extract_text()   # hers
+    assert "B7XQZ1" in stitched.pages[1].extract_text()   # his
+    assert len(pypdf.PdfReader(sorter.by_showing / "2026-08-12-1800-motor-city.pdf").pages) == 1
 
 
 def test_main_keeps_a_duplicate_out_of_both_groupings(sorter, make_pdf):
     """A handed-back or repeated ticket belongs to duplicates/ and to neither grouping —
-    the showing's folder is who is going, so a second ticket for it would overstate that."""
+    the showing's PDF is who is going, so a second ticket in it would overstate that."""
     make_pdf("1.pdf", into=sorter.input)
     make_pdf("2.pdf", into=sorter.input, reservation_code="B7XQZ1")
     sorter.run()
 
-    assert names_in(sorter.by_showing / "2026-08-11-2130-motor-city") == [
-        "motor-city-ABC123__anna-nowak.pdf"
-    ]
+    stitched = pypdf.PdfReader(sorter.by_showing / "2026-08-11-2130-motor-city.pdf")
+    assert len(stitched.pages) == 1
+    assert "ABC123" in stitched.pages[0].extract_text()
     assert names_in(sorter.output / "duplicates") == ["motor-city-B7XQZ1.pdf"]
 
 
@@ -439,6 +440,18 @@ def test_main_collapses_an_alias_into_one_recipient(sorter, make_pdf):
         "matrix-B7XQZ1__anna-nowak.pdf",
         "motor-city-ABC123__anna-nowak.pdf",
     ]
+
+
+def test_main_says_which_films_it_has_no_runtime_for(sorter, make_pdf, capsys):
+    """Otherwise a title biletomat spells its own way is silent — the run finishes, and
+    the showing quietly gets a calendar event of a made-up length."""
+    make_pdf("1.pdf", into=sorter.input, movie="Klub Nocny Marków")
+    make_pdf("2.pdf", into=sorter.input, reservation_code="B7XQZ1")  # Motor City, a known one
+    sorter.run()
+
+    err = capsys.readouterr().err
+    assert "note: no runtime known for Klub Nocny Marków" in err
+    assert "Motor City" not in err
 
 
 def test_main_skips_an_unrecognised_layout(sorter, make_pdf, capsys):
